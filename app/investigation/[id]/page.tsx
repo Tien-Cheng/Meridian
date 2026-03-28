@@ -7,6 +7,7 @@ import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import Link from "next/link";
 import dynamic from "next/dynamic";
+import Image from "next/image";
 import RightPanel from "./components/RightPanel";
 import TinyFishMonitor from "./components/TinyFishMonitor";
 import ActivityLog from "./components/ActivityLog";
@@ -159,11 +160,20 @@ export default function InvestigationPage() {
     <div className="flex flex-col h-screen bg-zinc-950">
       {/* Header */}
       <header className="flex items-center gap-3 px-6 py-3 header-glow bg-zinc-950 shrink-0">
-        <Link
-          href="/"
-          className="font-mono font-bold text-amber-500 tracking-widest text-sm hover:text-amber-400 transition-colors"
-        >
-          MERIDIAN
+        <Link href="/" className="flex items-center gap-3">
+          <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-md border border-amber-500/25 bg-zinc-900 shadow-[0_0_18px_rgba(245,158,11,0.14)]">
+            <Image
+              alt="Meridian logo"
+              className="h-full w-full scale-110 object-cover"
+              height={36}
+              priority
+              src="/meridian-logo.png"
+              width={36}
+            />
+          </span>
+          <span className="font-mono font-bold text-amber-500 tracking-widest text-sm hover:text-amber-400 transition-colors">
+            MERIDIAN
+          </span>
         </Link>
         <span className="text-zinc-700 font-mono">·</span>
         <span className="text-zinc-400 font-mono text-xs">

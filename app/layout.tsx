@@ -17,6 +17,11 @@ export const metadata: Metadata = {
   title: "Meridian",
   description:
     "Geospatial investigation agent for detecting unauthorized cross-border marketplace sellers",
+  icons: {
+    icon: "/meridian-logo.png",
+    shortcut: "/meridian-logo.png",
+    apple: "/meridian-logo.png",
+  },
 };
 
 export default function RootLayout({
