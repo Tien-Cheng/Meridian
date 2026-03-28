@@ -12,6 +12,15 @@ type Tab = "chat" | "evidence" | "case";
 
 interface RightPanelProps {
   investigationId: Id<"investigations">;
+  investigationContext: {
+    drugName?: string;
+    protectedMarket?: string;
+    regions?: Array<{
+      marketplace: string;
+      name: string;
+    }>;
+    sku?: string;
+  };
   selectedFindingId: Id<"findings"> | null;
   threadId: string;
   investigationStatus: string;
@@ -19,6 +28,7 @@ interface RightPanelProps {
 
 export default function RightPanel({
   investigationId,
+  investigationContext,
   selectedFindingId,
   threadId,
   investigationStatus,
@@ -80,7 +90,11 @@ export default function RightPanel({
       <div className="flex-1 min-h-0 relative">
         {activeTab === "chat" && (
           <div className="absolute inset-0 animate-in fade-in-0 slide-in-from-bottom-1 duration-150">
-            <ChatPanel threadId={threadId} />
+            <ChatPanel
+              investigationContext={investigationContext}
+              investigationStatus={investigationStatus}
+              threadId={threadId}
+            />
           </div>
         )}
         {activeTab === "evidence" && (
