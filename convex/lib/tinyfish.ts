@@ -444,7 +444,11 @@ export async function processTinyFishStream(
   ctx?: StreamContext,
   meta?: StreamMeta,
   updateAgentFn?: UpdateAgentFn,
-  options?: { readTimeoutMs?: number; maxDurationMs?: number }
+  options?: {
+    readTimeoutMs?: number;
+    maxDurationMs?: number;
+    browserSlotWaitTimeoutMs?: number;
+  }
 ): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -453,6 +457,7 @@ export async function processTinyFishStream(
 
   const readTimeoutMs = options?.readTimeoutMs ?? 45_000;
   const maxDurationMs = options?.maxDurationMs ?? 600_000;
+  const browserSlotWaitTimeoutMs = options?.browserSlotWaitTimeoutMs ?? 120_000;
   const decoder = new TextDecoder();
   let buffer = "";
   let result: unknown = null;
@@ -463,6 +468,7 @@ export async function processTinyFishStream(
   let latestStatusLabel = "TinyFish run started";
   let sawTerminalEvent = false;
   let consecutiveRunNotFound = 0;
+  let pendingSinceMs: number | null = null;
 
   const updateMonitor = async (
     status:
@@ -566,6 +572,17 @@ export async function processTinyFishStream(
     }
 
     if (runState.status === "PENDING") {
+      if (pendingSinceMs === null) {
+        pendingSinceMs = now;
+      }
+      const waitedMs = now - pendingSinceMs;
+      if (waitedMs >= browserSlotWaitTimeoutMs) {
+        const errorMessage = `Timed out waiting for TinyFish browser slot after ${Math.round(browserSlotWaitTimeoutMs / 1000)}s.`;
+        await updateMonitor("error", errorMessage, {
+          tinyfishRunId: activeRunId,
+        });
+        throw new Error(errorMessage);
+      }
       latestStatusLabel = "Waiting for TinyFish browser slot...";
       await updateMonitor("searching", latestStatusLabel, {
         streamingUrl: activeStreamingUrl,
@@ -576,6 +593,7 @@ export async function processTinyFishStream(
     }
 
     if (runState.status === "RUNNING") {
+      pendingSinceMs = null;
       latestStatusLabel = activeStreamingUrl
         ? "TinyFish run in progress"
         : "TinyFish run started";
@@ -588,6 +606,7 @@ export async function processTinyFishStream(
     }
 
     if (runState.status === "COMPLETED") {
+      pendingSinceMs = null;
       if (result === null && runState.result !== undefined) {
         result = runState.result;
       }

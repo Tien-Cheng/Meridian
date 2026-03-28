@@ -612,7 +612,12 @@ function buildNormalizationFailure(rawResult: unknown): MarketplaceSearchError {
 
 function shouldRetryWithStealth(message: string): boolean {
   const normalized = message.trim();
-  return looksBlocked(normalized) || /captcha|anti-bot|access denied/i.test(normalized);
+  return (
+    looksBlocked(normalized) ||
+    /captcha|anti-bot|access denied|browser slot|browser session|timed out waiting for tinyfish browser slot/i.test(
+      normalized
+    )
+  );
 }
 
 export async function runMarketplaceSearch(
