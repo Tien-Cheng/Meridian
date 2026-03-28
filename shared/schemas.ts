@@ -1,29 +1,49 @@
 import { z } from "zod/v4";
 
+const NonEmptyString = z.string().trim().min(1);
+
+export const InvestigationRegionSchema = z
+  .object({
+    name: NonEmptyString.describe("Region name, e.g. Germany"),
+    marketplace: NonEmptyString.describe(
+      "Marketplace identifier, e.g. Amazon US"
+    ),
+    marketplaceUrl: z
+      .string()
+      .trim()
+      .url()
+      .describe("Full URL, e.g. https://www.amazon.de"),
+    legitimatePrice: z
+      .number()
+      .positive()
+      .describe("Legitimate price in this region"),
+    currency: z
+      .string()
+      .trim()
+      .length(3)
+      .describe("Currency code, e.g. EUR"),
+    requiresPrescription: z
+      .boolean()
+      .describe("Whether the region requires prescription verification"),
+  })
+  .strict();
+
 // Investigation request parsed from user's free-text prompt
-export const InvestigationRequestSchema = z.object({
-  drugName: z.string().describe("The drug name, e.g. Ozempic"),
-  drugCategory: z
-    .string()
-    .describe("The drug class or investigation category, e.g. GLP-1 agonist"),
-  regions: z
-    .array(
-      z.object({
-        name: z.string().describe("Region name, e.g. Germany"),
-        marketplace: z.string().describe("Marketplace identifier, e.g. amazon.de"),
-        marketplaceUrl: z.string().describe("Full URL, e.g. https://www.amazon.de"),
-        legitimatePrice: z.number().describe("Legitimate price in this region"),
-        currency: z.string().describe("Currency code, e.g. EUR"),
-        requiresPrescription: z
-          .boolean()
-          .describe("Whether the region requires prescription verification"),
-      })
-    )
-    .describe("Regions/marketplaces to investigate"),
-  regulatoryContext: z
-    .string()
-    .describe("Regulatory context or target risk, e.g. unauthorized cross-border sales into the US"),
-});
+export const InvestigationRequestSchema = z
+  .object({
+    drugName: NonEmptyString.describe("The drug name, e.g. Ozempic"),
+    drugCategory: NonEmptyString.describe(
+      "The drug class or investigation category, e.g. GLP-1 agonist"
+    ),
+    regions: z
+      .array(InvestigationRegionSchema)
+      .min(1)
+      .describe("Regions/marketplaces to investigate"),
+    regulatoryContext: NonEmptyString.describe(
+      "Regulatory context or target risk, e.g. unauthorized cross-border sales into the US"
+    ),
+  })
+  .strict();
 
 // TinyFish extraction result for a single listing
 export const ListingExtractionSchema = z.object({
@@ -97,6 +117,7 @@ export const SellerClusteringSchema = z.object({
 });
 
 export type InvestigationRequest = z.infer<typeof InvestigationRequestSchema>;
+export type InvestigationRegion = z.infer<typeof InvestigationRegionSchema>;
 export type ListingExtraction = z.infer<typeof ListingExtractionSchema>;
 export type CaseGeneration = z.infer<typeof CaseGenerationSchema>;
 export type SellerClustering = z.infer<typeof SellerClusteringSchema>;

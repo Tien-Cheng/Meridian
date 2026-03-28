@@ -11,6 +11,8 @@ import { paginationOptsValidator } from "convex/server";
 import { components, internal } from "../_generated/api";
 import { investigatorAgent } from "../agents/investigator";
 
+const INVESTIGATOR_AGENT_NAME = "Meridian Investigator";
+
 export const createNewThread = mutation({
   args: {},
   handler: async (ctx) => {
@@ -37,6 +39,24 @@ export const sendMessage = mutation({
 export const generateResponse = internalAction({
   args: { threadId: v.string(), promptMessageId: v.string() },
   handler: async (ctx, { threadId, promptMessageId }) => {
+    const parseResult = await ctx.runAction(
+      internal.functions.investigations.parsePendingInvestigationPrompt,
+      { threadId }
+    );
+
+    if (parseResult.status === "clarification_needed") {
+      await saveMessage(ctx, components.agent, {
+        threadId,
+        promptMessageId,
+        agentName: INVESTIGATOR_AGENT_NAME,
+        message: {
+          role: "assistant",
+          content: parseResult.question,
+        },
+      });
+      return;
+    }
+
     await investigatorAgent.streamText(
       ctx,
       { threadId },

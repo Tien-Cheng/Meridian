@@ -5,11 +5,20 @@ import {
   internalMutation,
   internalAction,
 } from "../_generated/server";
+import { openai } from "@ai-sdk/openai";
+import { createThread, listUIMessages, type UIMessage } from "@convex-dev/agent";
 import { components, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
+import { generateObject } from "ai";
 import { v } from "convex/values";
+import { z } from "zod/v4";
 import { getAuthUserId } from "@convex-dev/auth/server";
-import { createThread } from "@convex-dev/agent";
+import {
+  InvestigationRequestSchema,
+  type InvestigationRegion,
+  type InvestigationRequest,
+} from "../../shared/schemas";
+import { MARKETPLACE_URLS } from "../lib/constants";
 import { getCoordinates } from "../lib/geocoding";
 import {
   getDemoCase,
@@ -22,6 +31,426 @@ import { runCaseGeneration } from "../tools/generateCaseFile";
 import { runInspectListing } from "../tools/inspectListing";
 
 type GeneratedCase = Awaited<ReturnType<typeof runCaseGeneration>>;
+type SupportedMarketplaceKey = keyof typeof MARKETPLACE_URLS;
+type SupportedMarketplace = {
+  key: SupportedMarketplaceKey;
+  marketplace: string;
+  regionName: string;
+  aliases: readonly string[];
+};
+
+const PromptClarificationFieldSchema = z.enum([
+  "drugName",
+  "drugCategory",
+  "regions",
+  "regulatoryContext",
+  "legitimatePrice",
+  "currency",
+  "requiresPrescription",
+  "protectedMarket",
+]);
+
+type ClarificationField = z.infer<typeof PromptClarificationFieldSchema>;
+type PersistParsedRequestResult =
+  | { applied: true }
+  | { applied: false; reason: "not_found" | "not_pending" | "already_parsed" };
+type ParsePendingInvestigationPromptResult =
+  | { status: "skip"; reason: "not_found" | "not_pending" | "already_parsed" }
+  | {
+      status: "clarification_needed";
+      question: string;
+      missingFields?: ClarificationField[];
+      reason?: string;
+    }
+  | {
+      status: "parsed";
+      investigationId: Id<"investigations">;
+      protectedMarket: string;
+    }
+  | { status: "error"; message: string };
+
+const InvestigationPromptResolutionSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("ready"),
+      request: InvestigationRequestSchema,
+      protectedMarket: z.string().trim().optional().nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("clarification_needed"),
+      clarifyingQuestion: z.string().trim().min(1),
+      missingFields: z.array(PromptClarificationFieldSchema).min(1),
+      reason: z.string().trim().min(1),
+    })
+    .strict(),
+]);
+
+const SUPPORTED_MARKETPLACES: SupportedMarketplace[] = [
+  {
+    key: "amazon.com",
+    marketplace: "Amazon US",
+    regionName: "United States",
+    aliases: [
+      "amazon us",
+      "amazon usa",
+      "amazon united states",
+      "amazon.com",
+    ],
+  },
+  {
+    key: "amazon.de",
+    marketplace: "Amazon Germany",
+    regionName: "Germany",
+    aliases: ["amazon germany", "amazon de", "amazon.de"],
+  },
+  {
+    key: "amazon.fr",
+    marketplace: "Amazon France",
+    regionName: "France",
+    aliases: ["amazon france", "amazon fr", "amazon.fr"],
+  },
+  {
+    key: "amazon.co.uk",
+    marketplace: "Amazon UK",
+    regionName: "United Kingdom",
+    aliases: [
+      "amazon uk",
+      "amazon united kingdom",
+      "amazon great britain",
+      "amazon.co.uk",
+    ],
+  },
+  {
+    key: "amazon.co.jp",
+    marketplace: "Amazon Japan",
+    regionName: "Japan",
+    aliases: ["amazon japan", "amazon jp", "amazon.co.jp"],
+  },
+  {
+    key: "amazon.sg",
+    marketplace: "Amazon Singapore",
+    regionName: "Singapore",
+    aliases: ["amazon singapore", "amazon sg", "amazon.sg"],
+  },
+  {
+    key: "lazada.sg",
+    marketplace: "Lazada Singapore",
+    regionName: "Singapore",
+    aliases: ["lazada singapore", "lazada sg", "lazada.sg"],
+  },
+  {
+    key: "lazada.co.th",
+    marketplace: "Lazada Thailand",
+    regionName: "Thailand",
+    aliases: ["lazada thailand", "lazada th", "lazada.co.th"],
+  },
+  {
+    key: "lazada.com.my",
+    marketplace: "Lazada Malaysia",
+    regionName: "Malaysia",
+    aliases: ["lazada malaysia", "lazada my", "lazada.com.my"],
+  },
+  {
+    key: "shopee.sg",
+    marketplace: "Shopee Singapore",
+    regionName: "Singapore",
+    aliases: ["shopee singapore", "shopee sg", "shopee.sg"],
+  },
+  {
+    key: "shopee.co.th",
+    marketplace: "Shopee Thailand",
+    regionName: "Thailand",
+    aliases: ["shopee thailand", "shopee th", "shopee.co.th"],
+  },
+  {
+    key: "shopee.com.my",
+    marketplace: "Shopee Malaysia",
+    regionName: "Malaysia",
+    aliases: ["shopee malaysia", "shopee my", "shopee.com.my"],
+  },
+  {
+    key: "ebay.com",
+    marketplace: "eBay US",
+    regionName: "United States",
+    aliases: ["ebay us", "ebay usa", "ebay united states", "ebay.com"],
+  },
+  {
+    key: "ebay.de",
+    marketplace: "eBay Germany",
+    regionName: "Germany",
+    aliases: ["ebay germany", "ebay de", "ebay.de"],
+  },
+  {
+    key: "ebay.co.uk",
+    marketplace: "eBay UK",
+    regionName: "United Kingdom",
+    aliases: ["ebay uk", "ebay united kingdom", "ebay.co.uk"],
+  },
+];
+
+const REGION_ALIASES = new Map<string, string>([
+  ["us", "United States"],
+  ["usa", "United States"],
+  ["united states", "United States"],
+  ["united states of america", "United States"],
+  ["singapore", "Singapore"],
+  ["sg", "Singapore"],
+  ["germany", "Germany"],
+  ["de", "Germany"],
+  ["france", "France"],
+  ["fr", "France"],
+  ["united kingdom", "United Kingdom"],
+  ["uk", "United Kingdom"],
+  ["great britain", "United Kingdom"],
+  ["japan", "Japan"],
+  ["jp", "Japan"],
+  ["thailand", "Thailand"],
+  ["th", "Thailand"],
+  ["malaysia", "Malaysia"],
+  ["my", "Malaysia"],
+]);
+
+const SUPPORTED_MARKETPLACE_PROMPT = SUPPORTED_MARKETPLACES.map(
+  ({ key, marketplace, regionName }) =>
+    `- ${marketplace} (${regionName}) => ${MARKETPLACE_URLS[key]}`
+).join("\n");
+
+const MARKETPLACE_ALIAS_LOOKUP = new Map<string, SupportedMarketplace>();
+
+for (const marketplace of SUPPORTED_MARKETPLACES) {
+  const aliases = [
+    marketplace.key,
+    MARKETPLACE_URLS[marketplace.key],
+    marketplace.marketplace,
+    ...marketplace.aliases,
+  ];
+
+  for (const alias of aliases) {
+    MARKETPLACE_ALIAS_LOOKUP.set(normalizeLookupToken(alias), marketplace);
+  }
+}
+
+function normalizeLookupToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/[._-]+/g, " ")
+    .replace(/[()]/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function lookupSupportedMarketplace(
+  value: string | undefined
+): SupportedMarketplace | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const directMatch = MARKETPLACE_ALIAS_LOOKUP.get(normalizeLookupToken(trimmed));
+  if (directMatch) {
+    return directMatch;
+  }
+
+  try {
+    const normalizedUrl = trimmed.includes("://")
+      ? trimmed
+      : `https://${trimmed}`;
+    const hostname = new URL(normalizedUrl).hostname;
+    return MARKETPLACE_ALIAS_LOOKUP.get(normalizeLookupToken(hostname)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalizeRegionName(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const normalized = normalizeLookupToken(trimmed);
+  return REGION_ALIASES.get(normalized) ?? null;
+}
+
+function normalizeCurrency(value: string): string | null {
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(normalized) ? normalized : null;
+}
+
+function buildConversationTranscript(messages: UIMessage[]): string {
+  return messages
+    .slice()
+    .reverse()
+    .filter((message) => {
+      if (message.role !== "user" && message.role !== "assistant") {
+        return false;
+      }
+      return message.text.trim().length > 0;
+    })
+    .map(
+      (message) =>
+        `${message.role === "user" ? "User" : "Assistant"}: ${message.text.trim()}`
+    )
+    .join("\n");
+}
+
+function normalizeInvestigationRegion(
+  region: InvestigationRegion
+): InvestigationRegion | null {
+  const canonicalMarketplace =
+    lookupSupportedMarketplace(region.marketplace) ??
+    lookupSupportedMarketplace(region.marketplaceUrl);
+  const currency = normalizeCurrency(region.currency);
+
+  if (!canonicalMarketplace || !currency) {
+    return null;
+  }
+
+  if (
+    typeof region.legitimatePrice !== "number" ||
+    !Number.isFinite(region.legitimatePrice) ||
+    region.legitimatePrice <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    name:
+      canonicalizeRegionName(region.name) ?? canonicalMarketplace.regionName,
+    marketplace: canonicalMarketplace.marketplace,
+    marketplaceUrl: MARKETPLACE_URLS[canonicalMarketplace.key],
+    legitimatePrice: region.legitimatePrice,
+    currency,
+    requiresPrescription: region.requiresPrescription,
+  };
+}
+
+function dedupeInvestigationRegions(
+  regions: InvestigationRegion[]
+): InvestigationRegion[] {
+  const deduped: InvestigationRegion[] = [];
+  const seen = new Set<string>();
+
+  for (const region of regions) {
+    const key = [
+      region.name,
+      region.marketplace,
+      region.marketplaceUrl,
+      region.currency,
+      region.requiresPrescription ? "rx" : "otc",
+    ]
+      .map((part) => normalizeLookupToken(part))
+      .join("|");
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(region);
+  }
+
+  return deduped;
+}
+
+function normalizeInvestigationRequest(
+  request: InvestigationRequest
+): InvestigationRequest | null {
+  const normalizedRegions: InvestigationRegion[] = [];
+
+  for (const region of request.regions) {
+    const normalizedRegion = normalizeInvestigationRegion(region);
+    if (!normalizedRegion) {
+      return null;
+    }
+    normalizedRegions.push(normalizedRegion);
+  }
+
+  try {
+    return InvestigationRequestSchema.parse({
+      drugName: request.drugName.trim(),
+      drugCategory: request.drugCategory.trim(),
+      regulatoryContext: request.regulatoryContext.trim(),
+      regions: dedupeInvestigationRegions(normalizedRegions),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function hasParsedInvestigationRequest(
+  investigation: Pick<
+    Doc<"investigations">,
+    "drugName" | "drugCategory" | "regions" | "regulatoryContext"
+  >
+): boolean {
+  if (
+    investigation.regions.length === 0 ||
+    investigation.regions.some(
+      (region) =>
+        region.legitimatePrice === undefined &&
+        region.baselinePrice === undefined
+    ) ||
+    investigation.regions.some(
+      (region) => region.requiresPrescription === undefined
+    )
+  ) {
+    return false;
+  }
+
+  try {
+    InvestigationRequestSchema.parse({
+      drugName: investigation.drugName ?? "",
+      drugCategory: investigation.drugCategory ?? "",
+      regulatoryContext: investigation.regulatoryContext ?? "",
+      regions: investigation.regions.map((region) => ({
+        name: region.name,
+        marketplace: region.marketplace,
+        marketplaceUrl: region.marketplaceUrl,
+        legitimatePrice:
+          region.legitimatePrice ?? region.baselinePrice ?? Number.NaN,
+        currency: region.currency,
+        requiresPrescription: region.requiresPrescription ?? false,
+      })),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function deriveProtectedMarket(
+  candidate: string | undefined | null,
+  request: InvestigationRequest
+): string {
+  const trimmedCandidate = candidate?.trim();
+  if (!trimmedCandidate) {
+    return request.regions[0]?.name ?? "";
+  }
+
+  const canonicalRegion = canonicalizeRegionName(trimmedCandidate);
+  if (canonicalRegion) {
+    return canonicalRegion;
+  }
+
+  const normalizedCandidate = normalizeLookupToken(trimmedCandidate);
+  const matchingRegion = request.regions.find(
+    (region) =>
+      normalizeLookupToken(region.name) === normalizedCandidate ||
+      normalizeLookupToken(region.marketplace) === normalizedCandidate
+  );
+
+  return matchingRegion?.name ?? trimmedCandidate;
+}
+
+function buildFallbackClarificationQuestion(): string {
+  return "Which exact marketplace-country combinations should I investigate, what legitimate price and currency should I benchmark against, and should those listings require a prescription?";
+}
 
 function normalizeSellerName(name: string): string {
   return name.trim().toLowerCase();
@@ -173,6 +602,16 @@ export const get = query({
   },
 });
 
+export const getByThreadId = internalQuery({
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) => {
+    return await ctx.db
+      .query("investigations")
+      .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+      .unique();
+  },
+});
+
 export const list = query({
   args: {},
   handler: async (ctx) => {
@@ -196,6 +635,178 @@ export const updateStatus = internalMutation({
   },
   handler: async (ctx, { id, status }) => {
     await ctx.db.patch(id, { status });
+  },
+});
+
+export const persistParsedRequest = internalMutation({
+  args: {
+    investigationId: v.id("investigations"),
+    drugName: v.string(),
+    drugCategory: v.string(),
+    regions: v.array(
+      v.object({
+        name: v.string(),
+        marketplace: v.string(),
+        marketplaceUrl: v.string(),
+        legitimatePrice: v.number(),
+        currency: v.string(),
+        requiresPrescription: v.boolean(),
+      })
+    ),
+    regulatoryContext: v.string(),
+    protectedMarket: v.string(),
+  },
+  handler: async (ctx, args): Promise<PersistParsedRequestResult> => {
+    const investigation = await ctx.db.get(args.investigationId);
+    if (!investigation) {
+      return { applied: false, reason: "not_found" as const };
+    }
+
+    if (investigation.status !== "pending") {
+      return { applied: false, reason: "not_pending" as const };
+    }
+
+    if (hasParsedInvestigationRequest(investigation)) {
+      return { applied: false, reason: "already_parsed" as const };
+    }
+
+    await ctx.db.patch(args.investigationId, {
+      drugName: args.drugName,
+      drugCategory: args.drugCategory,
+      regions: args.regions.map((region) => ({
+        ...region,
+        baselinePrice: region.legitimatePrice,
+      })),
+      regulatoryContext: args.regulatoryContext,
+      protectedMarket: args.protectedMarket,
+    });
+
+    return { applied: true as const };
+  },
+});
+
+export const parsePendingInvestigationPrompt = internalAction({
+  args: { threadId: v.string() },
+  handler: async (
+    ctx,
+    { threadId }
+  ): Promise<ParsePendingInvestigationPromptResult> => {
+    const investigation: Doc<"investigations"> | null = await ctx.runQuery(
+      internal.functions.investigations.getByThreadId,
+      { threadId }
+    );
+
+    if (!investigation) {
+      return { status: "skip" as const, reason: "not_found" as const };
+    }
+
+    if (investigation.status !== "pending") {
+      return { status: "skip" as const, reason: "not_pending" as const };
+    }
+
+    if (hasParsedInvestigationRequest(investigation)) {
+      return { status: "skip" as const, reason: "already_parsed" as const };
+    }
+
+    const { page } = await listUIMessages(ctx, components.agent, {
+      threadId,
+      paginationOpts: { cursor: null, numItems: 12 },
+    });
+
+    const transcript = buildConversationTranscript(page);
+    if (!transcript) {
+      return {
+        status: "clarification_needed" as const,
+        question: buildFallbackClarificationQuestion(),
+      };
+    }
+
+    const prompt = `You extract a structured Meridian investigation request from a chat transcript.
+
+Return status="ready" only when the request is complete, concrete, and unambiguous.
+Return status="clarification_needed" when any required field would be missing, partial, or guessed.
+
+When status="ready":
+- request.drugName should be the primary product or brand explicitly mentioned.
+- request.drugCategory should be the generic drug name or drug class explicitly mentioned in the conversation.
+- request.regulatoryContext should summarize the suspected counterfeit / unauthorized sale / prescription / cross-border concern in one sentence.
+- Every region must be fully populated with name, marketplace, marketplaceUrl, legitimatePrice, currency, and requiresPrescription.
+- If the user gives one legitimate price for the whole investigation, apply it to every region.
+- If the user says prescription-only or Rx required, set requiresPrescription=true for each relevant region.
+- Only use these supported marketplaces when they are referenced:
+${SUPPORTED_MARKETPLACE_PROMPT}
+- Infer protectedMarket only when the user clearly identifies a protected or destination market. Otherwise leave it empty.
+
+When status="clarification_needed":
+- Ask exactly one concise clarifying question that would unblock launch.
+- missingFields must identify the blocking fields.
+- Do not invent unsupported marketplaces, URLs, prices, currencies, or prescription rules.
+
+Conversation transcript (oldest to newest):
+${transcript}`;
+
+    try {
+      const { object } = await generateObject({
+        model: openai.chat("gpt-5.4-mini"),
+        schema: InvestigationPromptResolutionSchema,
+        prompt,
+        abortSignal: AbortSignal.timeout(45_000),
+      });
+
+      const resolution = InvestigationPromptResolutionSchema.parse(object);
+
+      if (resolution.status === "clarification_needed") {
+        return {
+          status: "clarification_needed" as const,
+          question: resolution.clarifyingQuestion,
+          missingFields: resolution.missingFields,
+          reason: resolution.reason,
+        };
+      }
+
+      const normalizedRequest = normalizeInvestigationRequest(resolution.request);
+      if (!normalizedRequest) {
+        return {
+          status: "clarification_needed" as const,
+          question: buildFallbackClarificationQuestion(),
+        };
+      }
+
+      const protectedMarket = deriveProtectedMarket(
+        resolution.protectedMarket,
+        normalizedRequest
+      );
+
+      const persistResult: PersistParsedRequestResult = await ctx.runMutation(
+        internal.functions.investigations.persistParsedRequest,
+        {
+          investigationId: investigation._id,
+          drugName: normalizedRequest.drugName,
+          drugCategory: normalizedRequest.drugCategory,
+          regions: normalizedRequest.regions,
+          regulatoryContext: normalizedRequest.regulatoryContext,
+          protectedMarket,
+        }
+      );
+
+      if (!persistResult.applied) {
+        return {
+          status: "skip" as const,
+          reason: persistResult.reason,
+        };
+      }
+
+      return {
+        status: "parsed" as const,
+        investigationId: investigation._id,
+        protectedMarket,
+      };
+    } catch (error) {
+      return {
+        status: "error" as const,
+        message: error instanceof Error ? error.message : "Unknown parse error",
+      };
+    }
   },
 });
 
@@ -505,7 +1116,9 @@ export const deepInvestigate = internalAction({
       const concern =
         finding.riskSignals
           .slice(0, 3)
-          .map((s) => s.label || s.signal)
+          .map(
+            (s: Doc<"findings">["riskSignals"][number]) => s.label || s.signal
+          )
           .join("; ") || `${finding.riskLevel} risk listing`;
 
       await ctx.runMutation(internal.functions.routes.createRoute, {
@@ -537,7 +1150,9 @@ export const deepInvestigate = internalAction({
       const concern =
         finding.riskSignals
           .slice(0, 3)
-          .map((s) => s.label || s.signal)
+          .map(
+            (s: Doc<"findings">["riskSignals"][number]) => s.label || s.signal
+          )
           .join("; ") || `${finding.riskLevel} risk listing`;
 
       await ctx.runMutation(internal.functions.routes.createRoute, {
