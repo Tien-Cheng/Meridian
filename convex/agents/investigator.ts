@@ -1,12 +1,6 @@
 import { Agent } from "@convex-dev/agent";
 import { components } from "../_generated/api";
 import { openai } from "@ai-sdk/openai";
-import { searchMarketplace } from "../tools/searchMarketplace";
-import { inspectListing } from "../tools/inspectListing";
-import { verifyShipping } from "../tools/verifyShipping";
-import { crawlStorefront } from "../tools/crawlStorefront";
-import { clusterSellers } from "../tools/clusterSellers";
-import { generateCaseFile } from "../tools/generateCaseFile";
 
 export const investigatorAgent = new Agent(components.agent, {
   name: "Meridian Investigator",
@@ -30,13 +24,5 @@ When generating a case, you should:
 - Clearly distinguish verified facts from inferences
 - Recommend specific next actions
 - Keep language professional and suitable for legal/compliance review`,
-  tools: {
-    searchMarketplace,
-    inspectListing,
-    verifyShipping,
-    crawlStorefront,
-    clusterSellers,
-    generateCaseFile,
-  },
   maxSteps: 15,
 });

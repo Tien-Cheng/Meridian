@@ -76,3 +76,29 @@ export const updateShippingVerification = internalMutation({
     });
   },
 });
+
+export const enrichFromInspection = internalMutation({
+  args: {
+    findingId: v.id("findings"),
+    title: v.optional(v.string()),
+    sellerName: v.optional(v.string()),
+    imageUrls: v.optional(v.array(v.string())),
+    hasPharmacyCredentials: v.optional(v.boolean()),
+    requiresPrescriptionCheck: v.optional(v.boolean()),
+    prescriptionRequired: v.optional(v.boolean()),
+    batchNumberVisible: v.optional(v.boolean()),
+    expiryDateVisible: v.optional(v.boolean()),
+    sellerVerificationBadge: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { findingId, ...patch }) => {
+    const updates = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined)
+    );
+
+    if (Object.keys(updates).length === 0) {
+      return;
+    }
+
+    await ctx.db.patch(findingId, updates);
+  },
+});
