@@ -1,20 +1,35 @@
+import type { GenericActionCtx, GenericDataModel } from "convex/server";
+import type { FunctionReference } from "convex/server";
 import { TINYFISH_API_URL } from "./constants";
 
 interface TinyFishRequest {
   url: string;
   goal: string;
-  proxy_config?: { enabled: boolean };
+  browser_profile?: "lite" | "stealth";
+  proxy_config?: { enabled: boolean; country_code?: string };
 }
 
-interface StreamContext {
-  runMutation: (fn: any, args: any) => Promise<any>;
-}
+type StreamContext = Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
 
 interface StreamMeta {
   investigationId: string;
   agentIndex: number;
   region: string;
 }
+
+type UpdateAgentFn = FunctionReference<"mutation", "public" | "internal">;
+
+type TinyFishEvent = {
+  type?: string;
+  result?: unknown;
+  error?: string;
+  status?: string;
+  step_description?: string;
+  purpose?: string;
+  screenshot_url?: string;
+  current_url?: string;
+  streaming_url?: string;
+};
 
 /**
  * Call the TinyFish SSE endpoint and process the event stream.
@@ -37,65 +52,135 @@ export async function callTinyFish(request: TinyFishRequest): Promise<Response> 
  */
 export async function processTinyFishStream(
   response: Response,
-  ctx: StreamContext,
-  meta: StreamMeta,
-  updateAgentFn: any
-): Promise<any> {
-  const reader = response.body!.getReader();
+  ctx?: StreamContext,
+  meta?: StreamMeta,
+  updateAgentFn?: UpdateAgentFn
+): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("TinyFish response did not include a stream body.");
+  }
+
   const decoder = new TextDecoder();
-  let result = null;
+  let buffer = "";
+  let result: unknown = null;
+
+  const updateMonitor = async (
+    status:
+      | "idle"
+      | "launching"
+      | "searching"
+      | "inspecting"
+      | "completed"
+      | "error"
+      | "crawling_storefront",
+    statusLabel: string,
+    extras?: { screenshotUrl?: string; currentUrl?: string }
+  ) => {
+    if (!ctx || !meta || !updateAgentFn) {
+      return;
+    }
+
+    await ctx.runMutation(updateAgentFn, {
+      investigationId: meta.investigationId,
+      agentIndex: meta.agentIndex,
+      status,
+      statusLabel,
+      screenshotUrl: extras?.screenshotUrl,
+      currentUrl: extras?.currentUrl,
+    });
+  };
+
+  const handleRawEvent = async (rawEvent: string) => {
+    const normalizedEvent = rawEvent.replace(/\r\n/g, "\n").trim();
+    if (!normalizedEvent) {
+      return;
+    }
+
+    const dataLines = normalizedEvent
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart());
+
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    let data: TinyFishEvent;
+    try {
+      data = JSON.parse(dataLines.join("\n")) as TinyFishEvent;
+    } catch {
+      return;
+    }
+
+    const eventType = data.type;
+    if (eventType === "HEARTBEAT") {
+      return;
+    }
+
+    if (eventType === "STEP" || eventType === "PROGRESS") {
+      const statusLabel =
+        typeof data.step_description === "string"
+          ? data.step_description
+          : typeof data.purpose === "string"
+            ? data.purpose
+            : "Working...";
+
+      await updateMonitor("searching", statusLabel, {
+        screenshotUrl:
+          typeof data.screenshot_url === "string"
+            ? data.screenshot_url
+            : undefined,
+        currentUrl:
+          typeof data.current_url === "string" ? data.current_url : undefined,
+      });
+      return;
+    }
+
+    if (eventType === "STREAMING_URL") {
+      await updateMonitor("searching", "Live browser active", {
+        currentUrl:
+          typeof data.streaming_url === "string"
+            ? data.streaming_url
+            : undefined,
+      });
+      return;
+    }
+
+    if (eventType === "COMPLETE") {
+      result = data.result ?? null;
+      await updateMonitor("completed", "Done");
+      return;
+    }
+
+    if (eventType === "ERROR") {
+      const errorMessage =
+        typeof data.error === "string" ? data.error : "Error occurred";
+      await updateMonitor("error", errorMessage);
+      throw new Error(errorMessage);
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    buffer = buffer.replace(/\r\n/g, "\n");
 
-    const chunk = decoder.decode(value);
-    const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
-
-    for (const line of lines) {
-      const data = JSON.parse(line.slice(6));
-
-      if (data.type === "STEP") {
-        await ctx.runMutation(updateAgentFn, {
-          investigationId: meta.investigationId,
-          agentIndex: meta.agentIndex,
-          status: "searching",
-          statusLabel: data.step_description || "Working...",
-          screenshotUrl: data.screenshot_url || undefined,
-          currentUrl: data.current_url || undefined,
-        });
-      }
-
-      if (data.type === "STREAMING_URL") {
-        await ctx.runMutation(updateAgentFn, {
-          investigationId: meta.investigationId,
-          agentIndex: meta.agentIndex,
-          status: "searching",
-          statusLabel: "Live browser active",
-          currentUrl: data.streaming_url || undefined,
-        });
-      }
-
-      if (data.type === "COMPLETE") {
-        result = data.result;
-        await ctx.runMutation(updateAgentFn, {
-          investigationId: meta.investigationId,
-          agentIndex: meta.agentIndex,
-          status: "completed",
-          statusLabel: "Done",
-        });
-      }
-
-      if (data.type === "ERROR") {
-        await ctx.runMutation(updateAgentFn, {
-          investigationId: meta.investigationId,
-          agentIndex: meta.agentIndex,
-          status: "error",
-          statusLabel: data.error || "Error occurred",
-        });
-        throw new Error(data.error);
-      }
+    let boundaryIndex = buffer.indexOf("\n\n");
+    while (boundaryIndex !== -1) {
+      const rawEvent = buffer.slice(0, boundaryIndex);
+      buffer = buffer.slice(boundaryIndex + 2);
+      await handleRawEvent(rawEvent);
+      boundaryIndex = buffer.indexOf("\n\n");
     }
+
+    if (done) {
+      break;
+    }
+  }
+
+  if (buffer.trim()) {
+    await handleRawEvent(buffer);
   }
 
   return result;
