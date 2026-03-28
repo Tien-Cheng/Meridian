@@ -485,7 +485,7 @@ export async function processTinyFishStream(
       return;
     }
 
-    await ctx.runMutation(updateAgentFn, {
+    const mutationArgs = {
       investigationId: meta.investigationId,
       agentIndex: meta.agentIndex,
       status,
@@ -494,7 +494,26 @@ export async function processTinyFishStream(
       streamingUrl: extras?.streamingUrl,
       currentUrl: extras?.currentUrl,
       tinyfishRunId: extras?.tinyfishRunId ?? activeRunId,
-    });
+    };
+
+    try {
+      await ctx.runMutation(updateAgentFn, mutationArgs);
+    } catch (error) {
+      // During mixed-version rollouts, older monitor validators may not yet accept
+      // tinyfishRunId. Retry without it so stream updates continue.
+      const message = error instanceof Error ? error.message : String(error);
+      const tinyfishRunIdRejected =
+        message.includes("ArgumentValidationError") &&
+        message.includes("tinyfishRunId");
+
+      if (!tinyfishRunIdRejected) {
+        throw error;
+      }
+
+      const legacyArgs = { ...mutationArgs };
+      delete legacyArgs.tinyfishRunId;
+      await ctx.runMutation(updateAgentFn, legacyArgs);
+    }
   };
 
   const syncRunState = async (force = false): Promise<"continue" | "completed"> => {
