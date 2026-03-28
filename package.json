@@ -18,6 +18,7 @@
     "@convex-dev/workflow": "^0.3.8",
     "@deck.gl/layers": "^9.2.11",
     "@deck.gl/react": "^9.2.11",
+    "ai": "^6.0.141",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "convex": "^1.33.1",

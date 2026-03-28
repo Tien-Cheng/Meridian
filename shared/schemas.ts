@@ -46,6 +46,7 @@ export const ListingExtractionSchema = z.object({
 // GPT case generation structured output
 export const CaseGenerationSchema = z.object({
   executiveSummary: z.string(),
+  publicHealthRiskAssessment: z.string(),
   findingSummaries: z.array(
     z.object({
       findingId: z.string(),
@@ -53,7 +54,7 @@ export const CaseGenerationSchema = z.object({
       marketplace: z.string(),
       sellerName: z.string(),
       riskScore: z.number(),
-      riskLevel: z.string(),
+      riskLevel: z.enum(["low", "medium", "high", "critical"]),
       topRiskSignals: z.array(z.string()),
     })
   ),
@@ -62,7 +63,7 @@ export const CaseGenerationSchema = z.object({
       clusterId: z.string(),
       sellerNames: z.array(z.string()),
       confidenceScore: z.number(),
-      networkRiskLevel: z.string(),
+      networkRiskLevel: z.enum(["low", "medium", "high", "critical"]),
       summary: z.string(),
     })
   ),
@@ -87,8 +88,10 @@ export const SellerClusteringSchema = z.object({
         imageReuse: z.boolean(),
         descriptionSimilarity: z.boolean(),
         catalogOverlap: z.boolean(),
+        sharedShippingOrigin: z.boolean(),
       }),
       confidenceScore: z.number().min(0).max(1),
+      networkRiskLevel: z.enum(["low", "medium", "high", "critical"]),
     })
   ),
 });
