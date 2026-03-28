@@ -31,6 +31,8 @@ export const searchMarketplace = createTool({
   execute: async (ctx, input): Promise<SearchMarketplaceOutput> => {
     try {
       return await runMarketplaceSearch({
+        threadId: ctx.threadId,
+        userId: ctx.userId,
         marketplaceUrl: input.marketplaceUrl,
         searchQuery: input.searchQuery,
         baselinePrice: input.baselinePrice,

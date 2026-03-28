@@ -69,6 +69,8 @@ type ExtractorCtx = Parameters<typeof extractorAgent.generateObject>[0];
 type StreamContext = Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
 
 export interface MarketplaceSearchInput {
+  threadId?: string;
+  userId?: string | null;
   marketplaceUrl: string;
   searchQuery: string;
   baselinePrice: number;
@@ -585,7 +587,9 @@ async function normalizeWithExtractor(
 
   const { object } = await extractorAgent.generateObject(
     ctx,
-    { userId: null },
+    input.threadId
+      ? { threadId: input.threadId }
+      : { userId: input.userId ?? "marketplace-search-system" },
     {
       prompt,
       output: "array",

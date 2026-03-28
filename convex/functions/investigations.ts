@@ -954,6 +954,7 @@ export const searchRegion = internalAction({
 
     try {
       const listings = await runMarketplaceSearch({
+        threadId: args.threadId,
         marketplaceUrl: args.marketplaceUrl,
         searchQuery: args.searchQuery,
         baselinePrice: args.legitimatePrice,
