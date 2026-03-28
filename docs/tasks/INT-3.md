@@ -26,3 +26,4 @@
   - Make sure the demo machine is charged and set to "Do Not Disturb"
   - Test that the app looks good on a projector/external display (colors may look different)
   - The "DEMO" button (A-6) is the ultimate safety net — if all else fails, click it and narrate over pre-seeded data
+  - Demo should use the Ozempic/semaglutide scenario. Verify that the demo prompt from C-5 produces the expected results. If live TinyFish is unreliable, the DEMO button should load pharma-specific pre-seeded data.

@@ -8,13 +8,13 @@
 - **Output contract:** Verify that findings created by `searchRegion` appear as markers on the map, and routes appear as arcs.
 - **Acceptance criteria:**
   - Real investigation findings appear as colored markers on the map at correct country locations
-  - Marker colors match suspicion status: amber for suspicious, emerald for normal, red for verified violation
-  - Route arcs are visible (if shippingRoutes exist in DB)
+  - Marker colors match risk level: emerald for low, amber for medium, red for high/critical
+  - Route arcs are visible (if `supplyRoutes` exist in DB)
   - Map auto-fits to contain all markers
   - Reactive updates work: new findings appear on map without page refresh
 - **Gotchas:**
   - If coordinates are `{latitude: 0, longitude: 0}`, markers appear in the Atlantic Ocean — this means `getCoordinates()` returned default values because the region name didn't match `REGION_COORDINATES` keys
-  - Region names are case-sensitive: "Germany" works, "germany" doesn't
-  - Check that the findings query used by InvestigationMap returns the required fields: `latitude`, `longitude`, `isSuspicious`, `shipsToProtectedMarket`
-  - If markers appear but routes don't, check that `shippingRoutes.listByInvestigation` query exists and returns data
+  - Region names are case-sensitive: "Singapore" works, "singapore" doesn't
+  - Check that the findings query used by InvestigationMap returns the required fields: `latitude`, `longitude`, `riskLevel`, `riskScore`
+  - If markers appear but routes don't, check that `supplyRoutes.listByInvestigation` query exists and returns data (table renamed from `shippingRoutes` to `supplyRoutes`)
   - The reactive query should auto-update — if it doesn't, verify the `useQuery` hook is called with the correct `investigationId`
