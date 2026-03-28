@@ -21,6 +21,8 @@ S0-1 ──→ S0-2 ─────────┼─── A-3 ──→ A-5
                         │          │         │              │
                         │          ├──→ B-5  └──→ B-6       │
                         │          │                        │
+                        ├─── B-7 ──→ B-8 ──────────────────┤
+                        │                                   │
                         ├─── C-1 ──→ C-2 ──→ C-7 ──→ A-7   │
                         │                                   │
                         ├─── C-3 ──→ C-4 ──────────────────→├──→ INT-1 ──→ INT-3
@@ -33,9 +35,9 @@ S0-1 ──→ S0-2 ─────────┼─── A-3 ──→ A-5
 
 ### Critical Path (Tier 1 Demo)
 ```
-S0-1 → S0-2 → B-1 → B-2 → B-4 → C-4 → INT-1 → INT-3
+S0-1 → S0-2 → B-1 → B-2 → B-4 → C-4 → B-7 → B-8 → INT-1 → INT-3
 ```
-**Estimated time on critical path:** ~4 hours (including TinyFish latency)
+**Estimated time on critical path:** ~5 hours (including TinyFish latency)
 
 ### Panic Escape Path (if TinyFish fails by 12:30)
 ```
@@ -65,6 +67,8 @@ S0-2 → A-1 → A-2 → A-6 + C-6 → INT-3
 | B-4 | Implement deepInvestigate action | B | T1 | 45m | B-3 | INT-1 |
 | B-5 | Implement verifyShipping tool | B | T2 | 45m | B-1 | — |
 | B-6 | Implement crawlStorefront tool | B | T2 | 40m | B-3 | — |
+| B-7 | Parse investigation prompt into structured request | B | T1 | 35m | S0-2 | B-8, INT-1 |
+| B-8 | Launch investigation workflow from chat | B | T1 | 30m | B-7 | INT-1 |
 | C-1 | Implement clusterSellers tool | C | T1 | 50m | S0-1 | C-2 |
 | C-2 | Implement clusterSellersAction | C | T1 | 40m | C-1 | C-7, A-7 |
 | C-3 | Implement generateCaseFile tool | C | T1 | 50m | S0-1 | C-4 |
@@ -72,7 +76,7 @@ S0-2 → A-1 → A-2 → A-6 + C-6 → INT-3
 | C-5 | Write demo script + seed prompts | C | T1 | 30m | none | INT-3 |
 | C-6 | Pre-baked agent messages (panic) | C | Panic | 30m | none | — |
 | C-7 | sellerDossiers query function | C | T2 | 15m | C-2 | A-7 |
-| INT-1 | End-to-end workflow smoke test | B+C | T1 | 30m | B-2, B-4, C-4 | INT-3 |
+| INT-1 | End-to-end workflow smoke test | B+C | T1 | 30m | B-2, B-4, B-8, C-4 | INT-3 |
 | INT-2 | Map data integration verification | A+B | T1 | 15m | B-2, A-3 | — |
 | INT-3 | Demo rehearsal | All | T1 | 20m | INT-1, C-5 | — |
 
@@ -85,7 +89,7 @@ S0-2 → A-1 → A-2 → A-6 + C-6 → INT-3
 | Builder | Must be done | Should be done |
 |---------|-------------|----------------|
 | A | A-1, A-2, A-8 | A-3 in progress |
-| B | B-1 (or pivoted to mocks) | B-2 started |
+| B | B-1 (or pivoted to mocks), B-7 | B-2 started |
 | C | C-1 | C-3 in progress, C-5 started |
 
 **Decision gate:** Is TinyFish returning parseable listings? If NO → Builder B hardcodes mock TinyFish responses and the team activates Panic fallback path.
@@ -99,7 +103,7 @@ S0-2 → A-1 → A-2 → A-6 + C-6 → INT-3
 | Builder | Must be done | Should be done |
 |---------|-------------|----------------|
 | A | A-1–A-4, A-6, A-8, INT-2 | — |
-| B | B-1–B-4, INT-1 | — |
+| B | B-1–B-4, B-7, B-8, INT-1 | — |
 | C | C-1–C-5, INT-1 | — |
 
 **Decision gate:** Does the full workflow run end-to-end? If NO → deploy Panic MVP.
@@ -127,12 +131,12 @@ S0-2 → A-1 → A-2 → A-6 + C-6 → INT-3
 | Builder | Tier 1 | Tier 2 | Panic | Integration | Total |
 |---------|--------|--------|-------|-------------|-------|
 | A | 125m | 75m | 50m | 15m | 265m |
-| B | 195m | 85m | 0m | 30m | 310m |
+| B | 260m | 85m | 0m | 30m | 375m |
 | C | 200m | 15m | 30m | 20m | 265m |
 
 **Available time per builder:** 330 min (5.5 hrs)
 
-Builder B is tightest on Tier 1 (195m of critical-path work). If TinyFish is slow, B should hardcode mock responses by 12:30 and circle back to live integration as Tier 2.
+Builder B is now even tighter on Tier 1 (260m of critical-path work) because prompt parsing and workflow-launch wiring were missing from the original DAG. If TinyFish is slow, B should hardcode mock responses by 12:30 and circle back to live integration as Tier 2.
 
 ---
 

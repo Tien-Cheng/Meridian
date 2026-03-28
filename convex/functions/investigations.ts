@@ -6,17 +6,25 @@ import {
   internalAction,
   type ActionCtx,
 } from "../_generated/server";
-import { internal } from "../_generated/api";
+import { components, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { openai } from "@ai-sdk/openai";
 import { generateObject } from "ai";
+import { createThread } from "@convex-dev/agent";
 import { getCoordinates } from "../lib/geocoding";
+import {
+  getDemoCase,
+  getDemoDossiers,
+  getDemoFindings,
+  getDemoRoutes,
+} from "../lib/demoData";
 import { runMarketplaceSearch } from "../lib/marketplaceSearch";
 import { riskAssessorAgent } from "../agents/riskAssessor";
 import { runSellerClustering } from "../tools/clusterSellers";
 import { runCaseGeneration } from "../tools/generateCaseFile";
+import { runInspectListing } from "../tools/inspectListing";
 import type {
   InvestigationRequest,
   ListingExtraction,
@@ -637,8 +645,10 @@ export const create = mutation({
     const drugCategory = args.drugCategory ?? args.brand ?? "";
     const brand = args.brand ?? args.drugCategory ?? "";
     const sku = args.sku ?? args.drugName ?? "";
-    const regulatoryContext = args.regulatoryContext ?? args.protectedMarket ?? "";
-    const protectedMarket = args.protectedMarket ?? args.regulatoryContext ?? "";
+    const regulatoryContext =
+      args.regulatoryContext ?? args.protectedMarket ?? "";
+    const protectedMarket =
+      args.protectedMarket ?? args.regulatoryContext ?? "";
     const regions = args.regions.map((region) => {
       const legitimatePrice = region.legitimatePrice ?? region.baselinePrice;
       const baselinePrice = region.baselinePrice ?? region.legitimatePrice;
@@ -836,6 +846,107 @@ export const maybeKickoffFromPrompt = internalAction({
   },
 });
 
+export const seedDemo = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await getAuthUserId(ctx);
+    const threadId = await createThread(ctx, components.agent);
+    const investigationId = await ctx.db.insert("investigations", {
+      userId: userId ?? undefined,
+      threadId,
+      drugName: "Ozempic",
+      drugCategory: "Semaglutide",
+      brand: "Novo Nordisk",
+      sku: "OZEMPIC-SEMAGLUTIDE-1MG",
+      regions: [
+        {
+          name: "United States",
+          marketplace: "Amazon US",
+          marketplaceUrl: "https://www.amazon.com",
+          legitimatePrice: 900,
+          baselinePrice: 900,
+          currency: "USD",
+          requiresPrescription: true,
+        },
+        {
+          name: "Singapore",
+          marketplace: "Lazada Singapore",
+          marketplaceUrl: "https://www.lazada.sg",
+          legitimatePrice: 900,
+          baselinePrice: 900,
+          currency: "USD",
+          requiresPrescription: true,
+        },
+        {
+          name: "Singapore",
+          marketplace: "Shopee Singapore",
+          marketplaceUrl: "https://shopee.sg",
+          legitimatePrice: 900,
+          baselinePrice: 900,
+          currency: "USD",
+          requiresPrescription: true,
+        },
+      ],
+      regulatoryContext:
+        "Investigate unauthorized cross-border semaglutide sales and counterfeit risk signals affecting Singapore and US buyers.",
+      protectedMarket: "Singapore",
+      status: "completed",
+      createdAt: Date.now(),
+    });
+
+    const findings = getDemoFindings({ investigationId, threadId });
+    const findingIdsByUrl: Record<string, Id<"findings">> = {};
+    const insertedFindings: Array<
+      Pick<
+        Doc<"findings">,
+        | "_id"
+        | "title"
+        | "marketplace"
+        | "sellerName"
+        | "riskScore"
+        | "riskLevel"
+        | "riskSignals"
+      >
+    > = [];
+
+    for (const finding of findings) {
+      const findingId = await ctx.db.insert("findings", finding);
+      findingIdsByUrl[finding.listingUrl] = findingId;
+      insertedFindings.push({
+        ...finding,
+        _id: findingId,
+      });
+    }
+
+    const routes = getDemoRoutes({ investigationId, findingIdsByUrl });
+    for (const route of routes) {
+      await ctx.db.insert("supplyRoutes", route);
+    }
+
+    const dossiers = getDemoDossiers({ investigationId, findingIdsByUrl });
+    const insertedDossiers: Array<
+      Pick<
+        Doc<"sellerDossiers">,
+        "clusterId" | "sellerNames" | "confidenceScore" | "networkRiskLevel"
+      >
+    > = [];
+    for (const dossier of dossiers) {
+      await ctx.db.insert("sellerDossiers", dossier);
+      insertedDossiers.push(dossier);
+    }
+
+    const caseFile = getDemoCase({
+      investigationId,
+      threadId,
+      findings: insertedFindings,
+      dossiers: insertedDossiers,
+    });
+    await ctx.db.insert("cases", caseFile);
+
+    return { investigationId, threadId };
+  },
+});
+
 export const listFindingsForInvestigation = internalQuery({
   args: { investigationId: v.id("investigations") },
   handler: async (ctx, { investigationId }) => {
@@ -930,7 +1041,6 @@ export const createSellerDossier = internalMutation({
   },
 });
 
-// Stub actions called by the investigation workflow
 export const searchRegion = internalAction({
   args: {
     investigationId: v.id("investigations"),
@@ -1066,8 +1176,157 @@ export const deepInvestigate = internalAction({
     threadId: v.string(),
     regulatoryContext: v.string(),
   },
-  handler: async () => {
-    // TODO: implement deep investigation of suspicious listings
+  handler: async (ctx, args) => {
+    // Update monitor status to "inspecting"
+    await ctx.runMutation(internal.functions.monitor.updateAgent, {
+      investigationId: args.investigationId,
+      agentIndex: 0,
+      status: "inspecting",
+      statusLabel: "Deep investigation: analyzing high-risk findings",
+    });
+
+    // Query high/critical findings using by_risk index
+    const highRiskFindings = await ctx.runQuery(
+      internal.functions.findings.listHighRiskFindings,
+      { investigationId: args.investigationId }
+    );
+
+    // Sort by riskScore descending, take top 3 for inspection
+    const sorted = [...highRiskFindings].sort(
+      (a, b) => b.riskScore - a.riskScore
+    );
+    const top3 = sorted.slice(0, 3);
+
+    let inspectedCount = 0;
+    let routesCreated = 0;
+
+    // Inspect top 3 findings and enrich with seller details
+    for (const finding of top3) {
+      await ctx.runMutation(internal.functions.monitor.updateAgent, {
+        investigationId: args.investigationId,
+        agentIndex: 0,
+        status: "inspecting",
+        statusLabel: `Inspecting listing: ${finding.sellerName} on ${finding.marketplace}`,
+        currentUrl: finding.listingUrl,
+      });
+
+      // Call inspectListing logic (catch errors per requirement)
+      try {
+        const result = await runInspectListing({
+          listingUrl: finding.listingUrl,
+          marketplace: finding.marketplace,
+          region: finding.region,
+        });
+
+        if (typeof result !== "string") {
+          // Enrich finding with inspection data
+          await ctx.runMutation(internal.functions.findings.enrichFinding, {
+            findingId: finding._id,
+            sellerStorefrontUrl:
+              result.sellerStorefrontUrl ?? undefined,
+            imageUrls:
+              result.imageUrls.length > 0 ? result.imageUrls : undefined,
+            productDescription:
+              result.productDescription ?? undefined,
+            hasPharmacyCredentials:
+              result.pharmacyBadgeVisible ?? undefined,
+            prescriptionRequired:
+              result.prescriptionRequired ?? undefined,
+            batchNumber: result.batchNumber ?? undefined,
+            batchNumberVisible:
+              result.batchNumber != null ? true : undefined,
+            expiryDate: result.expiryDate ?? undefined,
+            expiryDateVisible:
+              result.expiryDate != null ? true : undefined,
+            sellerRating: result.sellerRating ?? undefined,
+            sellerAccountAge: result.sellerAccountAge ?? undefined,
+            shippingEvidence: result.shippingInfo ?? undefined,
+            enrichedAt: Date.now(),
+          });
+          inspectedCount++;
+        } else {
+          console.warn(
+            `inspectListing returned error for ${finding._id}: ${result}`
+          );
+        }
+      } catch (error) {
+        console.error(
+          `inspectListing failed for finding ${finding._id}:`,
+          error instanceof Error ? error.message : error
+        );
+        // Continue with next listing
+      }
+
+      // Create supply route for this finding
+      const fromRegion = finding.shippingOrigin ?? finding.region;
+      const fromCoords = getCoordinates(fromRegion);
+      const toCoords = getCoordinates(finding.region);
+      const concern =
+        finding.riskSignals
+          .slice(0, 3)
+          .map((s) => s.label || s.signal)
+          .join("; ") || `${finding.riskLevel} risk listing`;
+
+      await ctx.runMutation(internal.functions.routes.createRoute, {
+        investigationId: args.investigationId,
+        findingId: finding._id,
+        fromRegion,
+        fromLatitude: fromCoords.latitude,
+        fromLongitude: fromCoords.longitude,
+        toRegion: finding.region,
+        toLatitude: toCoords.latitude,
+        toLongitude: toCoords.longitude,
+        verified: false,
+        verificationMethod: "risk_signal_heuristic",
+        riskLevel: finding.riskLevel as
+          | "low"
+          | "medium"
+          | "high"
+          | "critical",
+        concern,
+      });
+      routesCreated++;
+    }
+
+    // Create supply routes for remaining high/critical findings (no inspection)
+    for (const finding of sorted.slice(3)) {
+      const fromRegion = finding.shippingOrigin ?? finding.region;
+      const fromCoords = getCoordinates(fromRegion);
+      const toCoords = getCoordinates(finding.region);
+      const concern =
+        finding.riskSignals
+          .slice(0, 3)
+          .map((s) => s.label || s.signal)
+          .join("; ") || `${finding.riskLevel} risk listing`;
+
+      await ctx.runMutation(internal.functions.routes.createRoute, {
+        investigationId: args.investigationId,
+        findingId: finding._id,
+        fromRegion,
+        fromLatitude: fromCoords.latitude,
+        fromLongitude: fromCoords.longitude,
+        toRegion: finding.region,
+        toLatitude: toCoords.latitude,
+        toLongitude: toCoords.longitude,
+        verified: false,
+        verificationMethod: "risk_signal_heuristic",
+        riskLevel: finding.riskLevel as
+          | "low"
+          | "medium"
+          | "high"
+          | "critical",
+        concern,
+      });
+      routesCreated++;
+    }
+
+    // Update monitor to completed
+    await ctx.runMutation(internal.functions.monitor.updateAgent, {
+      investigationId: args.investigationId,
+      agentIndex: 0,
+      status: "completed",
+      statusLabel: `Deep investigation complete: ${inspectedCount} listings inspected, ${routesCreated} routes created`,
+    });
   },
 });
 
@@ -1155,7 +1414,9 @@ export const clusterSellersAction = internalAction({
       const marketplaces = uniqueStrings(
         clusterFindings.map((finding) => finding.marketplace)
       );
-      const regions = uniqueStrings(clusterFindings.map((finding) => finding.region));
+      const regions = uniqueStrings(
+        clusterFindings.map((finding) => finding.region)
+      );
       const relatedListingIds = uniqueStrings(
         clusterFindings.map((finding) => finding._id)
       ) as Id<"findings">[];
@@ -1301,6 +1562,7 @@ export const generateCase = internalAction({
       riskLevel: string;
       topRiskSignals: string[];
     }[] = [];
+
     for (const summary of generatedCase.findingSummaries) {
       const finding = findingsById.get(summary.findingId);
       if (!finding) continue;
@@ -1344,6 +1606,7 @@ export const generateCase = internalAction({
       networkRiskLevel: string;
       summary: string;
     }[] = [];
+
     for (const summary of generatedCase.sellerDossierSummaries) {
       const dossier = dossiersByCluster.get(summary.clusterId);
       if (!dossier) continue;

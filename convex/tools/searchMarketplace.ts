@@ -1,8 +1,6 @@
 import { createTool } from "@convex-dev/agent";
 import { z } from "zod/v4";
-import {
-  type ListingExtraction,
-} from "../../shared/schemas";
+import { type ListingExtraction } from "../../shared/schemas";
 import {
   MarketplaceSearchError,
   runMarketplaceSearch,

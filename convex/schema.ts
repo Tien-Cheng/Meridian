@@ -86,6 +86,14 @@ export default defineSchema({
     shippingEvidence: v.optional(v.string()),
     // Seller linking
     sellerClusterId: v.optional(v.string()),
+    // Enrichment (from inspectListing)
+    sellerStorefrontUrl: v.optional(v.string()),
+    productDescription: v.optional(v.string()),
+    batchNumber: v.optional(v.string()),
+    expiryDate: v.optional(v.string()),
+    sellerRating: v.optional(v.number()),
+    sellerAccountAge: v.optional(v.string()),
+    enrichedAt: v.optional(v.number()),
     // Metadata
     discoveredAt: v.number(),
   })
