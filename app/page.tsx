@@ -5,7 +5,7 @@ import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useRouter } from "next/navigation";
-
+import Image from "next/image";
 
 export default function Home() {
   const { isAuthenticated, isLoading } = useConvexAuth();
@@ -52,9 +52,21 @@ function Header() {
 
   return (
     <header className="sticky top-0 z-10 bg-zinc-950 px-6 py-4 header-glow flex items-center justify-between">
-      <h1 className="font-mono font-bold text-amber-500 tracking-widest text-lg">
-        MERIDIAN
-      </h1>
+      <div className="flex items-center gap-3">
+        <span className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-md border border-amber-500/25 bg-zinc-900 shadow-[0_0_18px_rgba(245,158,11,0.14)]">
+          <Image
+            alt="Meridian logo"
+            className="h-full w-full scale-110 object-cover"
+            height={40}
+            priority
+            src="/meridian-logo.png"
+            width={40}
+          />
+        </span>
+        <h1 className="font-mono font-bold text-amber-500 tracking-widest text-lg">
+          MERIDIAN
+        </h1>
+      </div>
       <button
         className="text-zinc-500 hover:text-zinc-300 font-mono text-xs cursor-pointer transition-colors"
         onClick={() => void signOut().then(() => router.push("/signin"))}
