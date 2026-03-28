@@ -26,6 +26,7 @@ export const sendMessage = mutation({
     investigationId: v.optional(v.id("investigations")),
   },
   handler: async (ctx, { threadId, prompt, investigationId }) => {
+    // If the chat message is tied to an investigation, schedule workflow kickoff.
     const { messageId } = await saveMessage(ctx, components.agent, {
       threadId,
       prompt,

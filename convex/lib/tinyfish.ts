@@ -56,6 +56,11 @@ interface TinyFishRunState {
   errorMessage?: string;
 }
 
+interface TinyFishRunLookup {
+  state?: TinyFishRunState;
+  notFound?: boolean;
+}
+
 interface NormalizedTinyFishEvent {
   eventType?: string;
   runId?: string;
@@ -354,7 +359,7 @@ function normalizeEventPayload(
 async function fetchRunState(
   runId: string,
   timeoutMs = 8_000
-): Promise<TinyFishRunState | undefined> {
+): Promise<TinyFishRunLookup> {
   const response = await fetch(`${TINYFISH_RUNS_API_BASE}/${runId}`, {
     method: "GET",
     headers: {
@@ -364,13 +369,17 @@ async function fetchRunState(
     signal: AbortSignal.timeout(timeoutMs),
   });
 
+  if (response.status === 404) {
+    return { notFound: true };
+  }
+
   if (!response.ok) {
-    return undefined;
+    return {};
   }
 
   const payload = (await response.json()) as unknown;
   if (!isRecord(payload)) {
-    return undefined;
+    return {};
   }
 
   const run = isRecord(payload.run) ? payload.run : payload;
@@ -387,15 +396,17 @@ async function fetchRunState(
   const errorObject = isRecord(run.error) ? run.error : isRecord(payload.error) ? payload.error : undefined;
 
   return {
-    status,
-    streamingUrl: extractStreamingUrl(run) ?? extractStreamingUrl(payload),
-    result: run.result ?? payload.result,
-    errorMessage: pickString(
-      errorObject?.message,
-      errorObject?.error,
-      run.error,
-      payload.error
-    ),
+    state: {
+      status,
+      streamingUrl: extractStreamingUrl(run) ?? extractStreamingUrl(payload),
+      result: run.result ?? payload.result,
+      errorMessage: pickString(
+        errorObject?.message,
+        errorObject?.error,
+        run.error,
+        payload.error
+      ),
+    },
   };
 }
 
@@ -451,6 +462,7 @@ export async function processTinyFishStream(
   let lastRunLookupAt = 0;
   let latestStatusLabel = "TinyFish run started";
   let sawTerminalEvent = false;
+  let consecutiveRunNotFound = 0;
 
   const updateMonitor = async (
     status:
@@ -496,13 +508,27 @@ export async function processTinyFishStream(
     }
     lastRunLookupAt = now;
 
-    let runState: TinyFishRunState | undefined;
+    let runLookup: TinyFishRunLookup;
     try {
-      runState = await fetchRunState(activeRunId);
+      runLookup = await fetchRunState(activeRunId);
     } catch {
       return "continue";
     }
 
+    if (runLookup.notFound) {
+      consecutiveRunNotFound += 1;
+      if (consecutiveRunNotFound >= 3) {
+        const errorMessage = `TinyFish run ${activeRunId} was not found by the runs API.`;
+        await updateMonitor("error", errorMessage, {
+          tinyfishRunId: activeRunId,
+        });
+        throw new Error(errorMessage);
+      }
+      return "continue";
+    }
+
+    consecutiveRunNotFound = 0;
+    const runState = runLookup.state;
     if (!runState) {
       return "continue";
     }
@@ -630,6 +656,9 @@ export async function processTinyFishStream(
     const eventType = event.eventType;
 
     if (event.runId) {
+      if (activeRunId !== event.runId) {
+        consecutiveRunNotFound = 0;
+      }
       activeRunId = event.runId;
     }
 

@@ -33,6 +33,7 @@ type TinyFishRunState = {
   status?: TinyFishRunStatus;
   streamingUrl?: string;
   errorMessage?: string;
+  notFound?: boolean;
 };
 
 type MonitorSnapshot = Awaited<ReturnType<typeof fetchMonitorSnapshot>>;
@@ -164,6 +165,9 @@ async function fetchRunState(
   });
 
   if (!response.ok) {
+    if (response.status === 404) {
+      return { notFound: true };
+    }
     return null;
   }
 
@@ -229,6 +233,18 @@ async function enrichSnapshot(
       const state = lookup.state;
       if (!state) {
         return agent;
+      }
+
+      if (state.notFound) {
+        const next: MonitorAgent = { ...agent };
+        if (
+          ACTIVE_MONITOR_STATUSES.has(next.status) &&
+          !TERMINAL_MONITOR_STATUSES.has(next.status)
+        ) {
+          next.statusLabel =
+            "TinyFish run reference not found. Waiting for retry...";
+        }
+        return next;
       }
 
       const next: MonitorAgent = { ...agent };
