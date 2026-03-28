@@ -16,8 +16,6 @@ export default function EvidencePanel({
       investigationId,
     }) ?? [];
 
-  const suspiciousFindings = findings.filter((f) => f.isSuspicious);
-
   return (
     <div className="flex flex-col h-full overflow-y-auto p-4 gap-6">
       {/* Findings Table */}
@@ -40,12 +38,12 @@ export default function EvidencePanel({
                   <span className="text-zinc-100 font-mono text-xs truncate max-w-[200px]">
                     {f.title}
                   </span>
-                  {f.isSuspicious && (
+                  {f.riskLevel !== "low" && (
                     <span className="text-amber-400 font-mono text-xs font-bold">
-                      SUSPICIOUS
+                      {f.riskLevel.toUpperCase()}
                     </span>
                   )}
-                  {f.shipsToProtectedMarket && (
+                  {f.shippingVerified && f.shipsInternationally && (
                     <span className="text-red-500 font-mono text-xs font-bold">
                       VIOLATION
                     </span>
@@ -59,7 +57,7 @@ export default function EvidencePanel({
                   </span>
                   <span
                     className={
-                      f.priceDeviation < -15
+                      f.riskLevel === "critical" || f.riskLevel === "high"
                         ? "text-red-400"
                         : "text-zinc-500"
                     }

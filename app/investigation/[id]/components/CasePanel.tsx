@@ -45,6 +45,15 @@ export default function CasePanel({ investigationId }: CasePanelProps) {
         </p>
       </section>
 
+      <section>
+        <h3 className="text-zinc-500 font-mono text-xs tracking-wider mb-2">
+          PUBLIC HEALTH RISK
+        </h3>
+        <p className="text-zinc-300 font-mono text-xs leading-relaxed">
+          {caseFile.publicHealthRiskAssessment}
+        </p>
+      </section>
+
       {/* Key Statistics */}
       <section>
         <h3 className="text-zinc-500 font-mono text-xs tracking-wider mb-2">
@@ -61,13 +70,13 @@ export default function CasePanel({ investigationId }: CasePanelProps) {
             color="text-amber-400"
           />
           <StatCard
-            label="VERIFIED VIOLATIONS"
-            value={caseFile.verifiedViolations}
+            label="HIGH RISK"
+            value={caseFile.highRiskListings}
             color="text-red-500"
           />
           <StatCard
-            label="SELLER CLUSTERS"
-            value={caseFile.sellerClustersIdentified}
+            label="SELLER NETWORKS"
+            value={caseFile.sellerNetworksIdentified}
           />
         </div>
       </section>

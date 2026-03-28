@@ -9,19 +9,24 @@ export default defineSchema({
   investigations: defineTable({
     userId: v.optional(v.string()),
     threadId: v.string(),
-    drugName: v.string(),
-    drugCategory: v.string(),
+    // Widened for compatibility with legacy investigation documents.
+    drugName: v.optional(v.string()),
+    drugCategory: v.optional(v.string()),
+    brand: v.optional(v.string()),
+    sku: v.optional(v.string()),
     regions: v.array(
       v.object({
         name: v.string(),
         marketplace: v.string(),
         marketplaceUrl: v.string(),
-        legitimatePrice: v.number(),
+        legitimatePrice: v.optional(v.number()),
+        baselinePrice: v.optional(v.number()),
         currency: v.string(),
-        requiresPrescription: v.boolean(),
+        requiresPrescription: v.optional(v.boolean()),
       })
     ),
-    regulatoryContext: v.string(),
+    regulatoryContext: v.optional(v.string()),
+    protectedMarket: v.optional(v.string()),
     status: v.union(
       v.literal("pending"),
       v.literal("searching"),

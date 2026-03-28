@@ -73,10 +73,10 @@ function NewInvestigationButton() {
     const threadId = await createNewThread();
     const id = await createInvestigation({
       threadId,
-      brand: "",
-      sku: "",
+      drugName: "",
+      drugCategory: "",
       regions: [],
-      protectedMarket: "",
+      regulatoryContext: "",
     });
     router.push(`/investigation/${id}`);
   };
@@ -117,7 +117,8 @@ function RecentInvestigations() {
             <div className="flex items-center gap-4">
               <StatusDot status={inv.status} />
               <span className="text-zinc-100 font-mono text-sm">
-                {inv.brand || "Untitled"} {inv.sku && `— ${inv.sku}`}
+                {inv.drugName || "Untitled"}
+                {inv.drugCategory && ` — ${inv.drugCategory}`}
               </span>
             </div>
             <span className="text-zinc-600 font-mono text-xs">

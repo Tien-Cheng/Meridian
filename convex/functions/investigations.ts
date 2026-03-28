@@ -98,37 +98,57 @@ function buildFallbackCase({
 
 export const create = mutation({
   args: {
-    brand: v.string(),
-    sku: v.string(),
+    drugName: v.optional(v.string()),
+    drugCategory: v.optional(v.string()),
+    brand: v.optional(v.string()),
+    sku: v.optional(v.string()),
     regions: v.array(
       v.object({
         name: v.string(),
         marketplace: v.string(),
         marketplaceUrl: v.string(),
-        baselinePrice: v.number(),
+        legitimatePrice: v.optional(v.number()),
+        baselinePrice: v.optional(v.number()),
         currency: v.string(),
+        requiresPrescription: v.optional(v.boolean()),
       })
     ),
-    protectedMarket: v.string(),
+    regulatoryContext: v.optional(v.string()),
+    protectedMarket: v.optional(v.string()),
     threadId: v.string(),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
-    const id = await ctx.db.insert("investigations", {
-      userId: userId ?? undefined,
-      threadId: args.threadId,
-      // Kept for compatibility with current workflow inputs.
-      drugName: args.sku,
-      drugCategory: args.brand,
-      regions: args.regions.map((region) => ({
+    const drugName = args.drugName ?? args.sku ?? "";
+    const drugCategory = args.drugCategory ?? args.brand ?? "";
+    const brand = args.brand ?? args.drugCategory ?? "";
+    const sku = args.sku ?? args.drugName ?? "";
+    const regulatoryContext = args.regulatoryContext ?? args.protectedMarket ?? "";
+    const protectedMarket = args.protectedMarket ?? args.regulatoryContext ?? "";
+    const regions = args.regions.map((region) => {
+      const legitimatePrice = region.legitimatePrice ?? region.baselinePrice;
+      const baselinePrice = region.baselinePrice ?? region.legitimatePrice;
+      return {
         name: region.name,
         marketplace: region.marketplace,
         marketplaceUrl: region.marketplaceUrl,
-        legitimatePrice: region.baselinePrice,
         currency: region.currency,
-        requiresPrescription: true,
-      })),
-      regulatoryContext: args.protectedMarket,
+        requiresPrescription: region.requiresPrescription ?? true,
+        ...(legitimatePrice !== undefined ? { legitimatePrice } : {}),
+        ...(baselinePrice !== undefined ? { baselinePrice } : {}),
+      };
+    });
+
+    const id = await ctx.db.insert("investigations", {
+      userId: userId ?? undefined,
+      threadId: args.threadId,
+      drugName,
+      drugCategory,
+      brand,
+      sku,
+      regions,
+      regulatoryContext,
+      protectedMarket,
       status: "pending",
       createdAt: Date.now(),
     });
@@ -273,7 +293,7 @@ export const searchRegion = internalAction({
     marketplace: v.string(),
     marketplaceUrl: v.string(),
     searchQuery: v.string(),
-    baselinePrice: v.number(),
+    legitimatePrice: v.number(),
     currency: v.string(),
   },
   handler: async () => {
@@ -285,7 +305,7 @@ export const deepInvestigate = internalAction({
   args: {
     investigationId: v.id("investigations"),
     threadId: v.string(),
-    protectedMarket: v.string(),
+    regulatoryContext: v.string(),
   },
   handler: async () => {
     // TODO: implement deep investigation of suspicious listings
@@ -424,9 +444,13 @@ export const generateCase = internalAction({
   args: {
     investigationId: v.id("investigations"),
     threadId: v.string(),
-    protectedMarket: v.string(),
+    regulatoryContext: v.optional(v.string()),
+    protectedMarket: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const protectedMarket =
+      args.protectedMarket ?? args.regulatoryContext ?? "target market";
+
     const findings: Doc<"findings">[] = await ctx.runQuery(
       internal.functions.investigations.listFindingsForInvestigation,
       { investigationId: args.investigationId }
@@ -454,7 +478,7 @@ export const generateCase = internalAction({
     const sellerNetworksIdentified = dossiers.length;
 
     const evidenceJson = JSON.stringify({
-      protectedMarket: args.protectedMarket,
+      protectedMarket,
       investigation: {
         _id: args.investigationId,
         drugName: investigation?.drugName ?? "",
@@ -502,7 +526,7 @@ export const generateCase = internalAction({
       generatedCase = buildFallbackCase({
         findings,
         dossiers,
-        protectedMarket: args.protectedMarket,
+        protectedMarket,
       });
     }
 
@@ -598,7 +622,7 @@ export const generateCase = internalAction({
             {
               action: "Escalate case for manual review",
               priority: "high" as const,
-              targetEntity: `${args.protectedMarket} Health Authority`,
+              targetEntity: `${protectedMarket} Health Authority`,
               detail:
                 "AI action synthesis was unavailable; submit evidence for manual regulatory triage.",
             },
