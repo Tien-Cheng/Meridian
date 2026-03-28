@@ -148,6 +148,10 @@
   border-radius: 0;
   background: rgba(9, 9, 11, 0.96);
   padding: 0;
+  max-width: min(18rem, calc(100vw - 1.5rem));
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
 }
 
