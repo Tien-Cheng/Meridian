@@ -14,18 +14,17 @@ interface RightPanelProps {
   investigationId: Id<"investigations">;
   selectedFindingId: Id<"findings"> | null;
   threadId: string;
+  investigationStatus: string;
 }
 
 export default function RightPanel({
   investigationId,
   selectedFindingId,
   threadId,
+  investigationStatus,
 }: RightPanelProps) {
   const [preCompletionTab, setPreCompletionTab] = useState<Tab>("chat");
   const [postCompletionTab, setPostCompletionTab] = useState<Tab | null>(null);
-  const investigation = useQuery(api.functions.investigations.get, {
-    id: investigationId,
-  });
   const findings =
     useQuery(api.functions.findings.listByInvestigation, {
       investigationId,
@@ -35,7 +34,7 @@ export default function RightPanel({
   });
   const evidenceCount = findings.length;
   const caseReady = Boolean(caseFile);
-  const isCompleted = investigation?.status === "completed";
+  const isCompleted = investigationStatus === "completed";
   const activeTab = isCompleted ? (postCompletionTab ?? "case") : preCompletionTab;
 
   const tabMeta = useMemo(

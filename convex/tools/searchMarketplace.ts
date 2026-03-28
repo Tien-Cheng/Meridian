@@ -304,19 +304,27 @@ function extractJsonCandidates(text: string): string[] {
   return [...candidates];
 }
 
-function extractListingArray(parsed: unknown): unknown[] | undefined {
+function extractListingArray(
+  parsed: unknown,
+  depth = 0
+): unknown[] | undefined {
   if (Array.isArray(parsed)) {
     return parsed;
   }
 
-  if (!isRecord(parsed)) {
+  if (!isRecord(parsed) || depth > 3) {
     return undefined;
   }
 
-  for (const key of ["listings", "results", "items", "products", "data"]) {
+  for (const key of ["result", "listings", "results", "items", "products", "data"]) {
     const value = parsed[key];
-    if (Array.isArray(value)) {
-      return value;
+    if (value === undefined) {
+      continue;
+    }
+
+    const extracted = extractListingArray(value, depth + 1);
+    if (extracted) {
+      return extracted;
     }
   }
 
@@ -507,11 +515,14 @@ async function normalizeWithExtractor(
 
   const { object } = await extractorAgent.generateObject(
     ctx,
-    { threadId: ctx.threadId, userId: ctx.userId ?? null },
+    { userId: ctx.userId ?? null },
     {
       prompt,
       output: "array",
       schema: ListingExtractionSchema,
+    },
+    {
+      storageOptions: { saveMessages: "none" },
     }
   );
 

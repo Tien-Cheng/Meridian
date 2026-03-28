@@ -207,6 +207,7 @@ export default function InvestigationPage() {
           >
             <RightPanel
               investigationId={investigationId}
+              investigationStatus={investigation.status}
               selectedFindingId={selectedFindingId}
               threadId={investigation.threadId}
             />
