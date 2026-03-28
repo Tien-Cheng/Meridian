@@ -38,8 +38,12 @@ const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
 
 const BLOCKED_PATTERNS = [
   /access denied/i,
+  /\b403\b/i,
   /captcha/i,
+  /recaptcha/i,
+  /hcaptcha/i,
   /cloudflare/i,
+  /datadome/i,
   /checking your browser/i,
   /security check/i,
   /blocked/i,
@@ -210,23 +214,32 @@ function buildSearchGoal(input: {
   currency: string;
 }): string {
   return [
-    `1. Open ${input.marketplaceUrl} and wait for the main page to finish loading.`,
-    "2. If a cookie consent, privacy, region, or newsletter popup appears, dismiss it using the visible button text and wait a moment before continuing.",
-    `3. Use the visible search box on the page to search for "${input.searchQuery}". Submit the search the way a normal shopper would.`,
-    "4. Wait for the current search results page to fully load.",
-    "5. Stay on this current results page only. Do not paginate or open product detail pages unless a listing URL is only visible after hovering or a lightweight preview.",
-    "6. Extract every clearly visible product listing on this current results page.",
-    "7. For each listing return these fields: title, price as a number without currency symbols, currency, sellerName, listingUrl, imageUrls, shippingInfo, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
-    "8. Use null or omit a field when it is not visible. Do not invent values.",
-    "9. If a challenge, redirect, or 'checking your browser' page appears, wait once for it to finish automatically and then continue.",
-    "10. If access is still blocked, a CAPTCHA appears, or the actual search results never load, return {\"error\":\"blocked\",\"reason\":\"brief explanation\"}.",
-    `11. For context only, the legitimate reference price is about ${input.baselinePrice} ${input.currency}; do not calculate or return risk scoring here.`,
-    "12. Return only valid JSON with no markdown. Prefer a JSON array of listing objects.",
+    `1. Open ${input.marketplaceUrl} and wait for the main page to fully load before interacting.`,
+    "2. If a cookie consent, privacy, region, or newsletter popup appears, dismiss it using visible button text and wait 1 second before continuing.",
+    `3. Use the visible search bar near the top of the page to search for "${input.searchQuery}" and submit like a normal shopper.`,
+    "4. Wait for autocomplete, redirects, and the current search results page to finish loading.",
+    "5. Stay on this current results page only. Do not paginate and do not open product detail pages unless a listing URL is only visible after hover/preview.",
+    "6. Interact based on visible text and layout, not hidden selectors.",
+    "7. Extract every clearly visible product listing on this current results page.",
+    "8. For each listing return these fields: title, price as a number without currency symbols, currency, sellerName, listingUrl, imageUrls, shippingInfo, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
+    "9. Use null or omit a field when it is not visible. Do not invent values.",
+    "10. If a challenge, redirect, or 'checking your browser' screen appears, wait once for it to finish automatically and continue.",
+    "11. If an Access Denied/403 page appears or any CAPTCHA appears (reCAPTCHA/hCaptcha), return {\"error\":\"blocked\",\"reason\":\"brief explanation\"}.",
+    `12. For context only, the legitimate reference price is about ${input.baselinePrice} ${input.currency}; do not calculate or return risk scoring here.`,
+    "13. Return only valid JSON with no markdown. Prefer a JSON array of listing objects.",
   ].join("\n");
 }
 
 function looksBlocked(text: string): boolean {
   return BLOCKED_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function withCaptchaLimitHint(message: string): string {
+  if (!/captcha|recaptcha|hcaptcha/i.test(message)) {
+    return message;
+  }
+
+  return `${message} TinyFish currently cannot solve CAPTCHA challenges automatically; stealth mode, proxy usage, and human-like goals reduce trigger rate but do not bypass an active CAPTCHA.`;
 }
 
 function safeSerialize(value: unknown): string {
@@ -603,7 +616,7 @@ export const searchMarketplace = createTool({
           })()
         : undefined);
     if (failure) {
-      return failure;
+      return withCaptchaLimitHint(failure);
     }
 
     const normalized = parseStructuredCandidates(rawResult, input);
