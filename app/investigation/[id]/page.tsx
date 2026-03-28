@@ -69,6 +69,7 @@ export default function InvestigationPage() {
           <RightPanel
             investigationId={investigationId}
             threadId={investigation.threadId}
+            investigationStatus={investigation.status}
           />
         </div>
       </div>

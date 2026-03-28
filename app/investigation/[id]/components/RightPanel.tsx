@@ -11,13 +11,17 @@ type Tab = "chat" | "evidence" | "case";
 interface RightPanelProps {
   investigationId: Id<"investigations">;
   threadId: string;
+  investigationStatus: string;
 }
 
 export default function RightPanel({
   investigationId,
   threadId,
+  investigationStatus,
 }: RightPanelProps) {
-  const [activeTab, setActiveTab] = useState<Tab>("chat");
+  const [selectedTab, setSelectedTab] = useState<Tab>("chat");
+  const activeTab: Tab =
+    investigationStatus === "completed" ? "case" : selectedTab;
 
   return (
     <div className="flex flex-col h-full">
@@ -31,7 +35,7 @@ export default function RightPanel({
                 ? "text-amber-500 border-b border-amber-500"
                 : "text-zinc-500 hover:text-zinc-300"
             }`}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => setSelectedTab(tab)}
           >
             {tab}
           </button>
