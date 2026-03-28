@@ -50,7 +50,8 @@ export default function InvestigationPage() {
         </span>
         <span className="text-zinc-700 font-mono">·</span>
         <span className="text-zinc-400 font-mono text-xs">
-          {investigation.brand || "UNTITLED"} {investigation.sku}
+          {investigation.drugName || "UNTITLED"}
+          {investigation.drugCategory && ` ${investigation.drugCategory}`}
         </span>
         <span className="text-zinc-700 font-mono">·</span>
         <InvestigationStatus status={investigation.status} />

@@ -9,18 +9,19 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 
 export const create = mutation({
   args: {
-    brand: v.string(),
-    sku: v.string(),
+    drugName: v.string(),
+    drugCategory: v.string(),
     regions: v.array(
       v.object({
         name: v.string(),
         marketplace: v.string(),
         marketplaceUrl: v.string(),
-        baselinePrice: v.number(),
+        legitimatePrice: v.number(),
         currency: v.string(),
+        requiresPrescription: v.boolean(),
       })
     ),
-    protectedMarket: v.string(),
+    regulatoryContext: v.string(),
     threadId: v.string(),
   },
   handler: async (ctx, args) => {
@@ -28,10 +29,10 @@ export const create = mutation({
     const id = await ctx.db.insert("investigations", {
       userId: userId ?? undefined,
       threadId: args.threadId,
-      brand: args.brand,
-      sku: args.sku,
+      drugName: args.drugName,
+      drugCategory: args.drugCategory,
       regions: args.regions,
-      protectedMarket: args.protectedMarket,
+      regulatoryContext: args.regulatoryContext,
       status: "pending",
       createdAt: Date.now(),
     });
@@ -85,7 +86,7 @@ export const searchRegion = internalAction({
     marketplace: v.string(),
     marketplaceUrl: v.string(),
     searchQuery: v.string(),
-    baselinePrice: v.number(),
+    legitimatePrice: v.number(),
     currency: v.string(),
   },
   handler: async (_ctx, _args) => {
@@ -97,7 +98,7 @@ export const deepInvestigate = internalAction({
   args: {
     investigationId: v.id("investigations"),
     threadId: v.string(),
-    protectedMarket: v.string(),
+    regulatoryContext: v.string(),
   },
   handler: async (_ctx, _args) => {
     // TODO: implement deep investigation of suspicious listings
@@ -118,7 +119,7 @@ export const generateCase = internalAction({
   args: {
     investigationId: v.id("investigations"),
     threadId: v.string(),
-    protectedMarket: v.string(),
+    regulatoryContext: v.string(),
   },
   handler: async (_ctx, _args) => {
     // TODO: implement case file generation

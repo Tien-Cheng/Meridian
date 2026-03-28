@@ -7,18 +7,20 @@ export const create = internalMutation({
     threadId: v.string(),
     title: v.string(),
     executiveSummary: v.string(),
+    publicHealthRiskAssessment: v.string(),
     totalListingsFound: v.number(),
     suspiciousListings: v.number(),
-    verifiedViolations: v.number(),
-    sellerClustersIdentified: v.number(),
+    highRiskListings: v.number(),
+    sellerNetworksIdentified: v.number(),
     findingSummaries: v.array(
       v.object({
         findingId: v.id("findings"),
         title: v.string(),
         marketplace: v.string(),
         sellerName: v.string(),
-        priceDeviation: v.number(),
-        shippingVerified: v.boolean(),
+        riskScore: v.number(),
+        riskLevel: v.string(),
+        topRiskSignals: v.array(v.string()),
       })
     ),
     sellerDossierSummaries: v.array(
@@ -26,6 +28,7 @@ export const create = internalMutation({
         clusterId: v.string(),
         sellerNames: v.array(v.string()),
         confidenceScore: v.number(),
+        networkRiskLevel: v.string(),
         summary: v.string(),
       })
     ),
@@ -38,6 +41,7 @@ export const create = internalMutation({
           v.literal("low")
         ),
         detail: v.string(),
+        targetEntity: v.string(),
       })
     ),
   },

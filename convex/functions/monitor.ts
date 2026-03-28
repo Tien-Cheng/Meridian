@@ -48,7 +48,8 @@ export const updateAgent = internalMutation({
       v.literal("launching"),
       v.literal("searching"),
       v.literal("inspecting"),
-      v.literal("verifying_shipping"),
+      v.literal("verifying_credentials"),
+      v.literal("checking_shipping"),
       v.literal("crawling_storefront"),
       v.literal("completed"),
       v.literal("error")

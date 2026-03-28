@@ -11,14 +11,33 @@ export const create = internalMutation({
     sellerName: v.string(),
     listedPrice: v.number(),
     currency: v.string(),
-    baselinePrice: v.number(),
+    legitimatePrice: v.number(),
     priceDeviation: v.number(),
     listingUrl: v.string(),
     imageUrls: v.optional(v.array(v.string())),
     latitude: v.number(),
     longitude: v.number(),
-    isSuspicious: v.boolean(),
-    suspicionReasons: v.array(v.string()),
+    riskScore: v.number(),
+    riskLevel: v.union(
+      v.literal("low"),
+      v.literal("medium"),
+      v.literal("high"),
+      v.literal("critical")
+    ),
+    riskSignals: v.array(
+      v.object({
+        signal: v.string(),
+        label: v.string(),
+        weight: v.number(),
+        evidence: v.string(),
+      })
+    ),
+    hasPharmacyCredentials: v.optional(v.boolean()),
+    requiresPrescriptionCheck: v.optional(v.boolean()),
+    prescriptionRequired: v.optional(v.boolean()),
+    batchNumberVisible: v.optional(v.boolean()),
+    expiryDateVisible: v.optional(v.boolean()),
+    sellerVerificationBadge: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert("findings", {
@@ -44,13 +63,15 @@ export const updateShippingVerification = internalMutation({
   args: {
     findingId: v.id("findings"),
     shippingVerified: v.boolean(),
-    shipsToProtectedMarket: v.boolean(),
+    shipsInternationally: v.boolean(),
+    shippingOrigin: v.optional(v.string()),
     shippingEvidence: v.optional(v.string()),
   },
   handler: async (ctx, { findingId, ...patch }) => {
     await ctx.db.patch(findingId, {
       shippingVerified: patch.shippingVerified,
-      shipsToProtectedMarket: patch.shipsToProtectedMarket,
+      shipsInternationally: patch.shipsInternationally,
+      shippingOrigin: patch.shippingOrigin,
       shippingEvidence: patch.shippingEvidence,
     });
   },

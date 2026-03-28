@@ -7,7 +7,7 @@ interface TinyFishRequest {
 }
 
 interface StreamContext {
-  runMutation: (fn: any, args: any) => Promise<any>;
+  runMutation: (fn: unknown, args: Record<string, unknown>) => Promise<unknown>;
 }
 
 interface StreamMeta {
@@ -39,11 +39,11 @@ export async function processTinyFishStream(
   response: Response,
   ctx: StreamContext,
   meta: StreamMeta,
-  updateAgentFn: any
-): Promise<any> {
+  updateAgentFn: unknown
+): Promise<unknown> {
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
-  let result = null;
+  let result: unknown = null;
 
   while (true) {
     const { done, value } = await reader.read();

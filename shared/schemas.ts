@@ -2,22 +2,27 @@ import { z } from "zod/v4";
 
 // Investigation request parsed from user's free-text prompt
 export const InvestigationRequestSchema = z.object({
-  brand: z.string().describe("The brand name, e.g. SK-II"),
-  sku: z.string().describe("The product name or SKU, e.g. Facial Treatment Essence"),
+  drugName: z.string().describe("The drug name, e.g. Ozempic"),
+  drugCategory: z
+    .string()
+    .describe("The drug class or investigation category, e.g. GLP-1 agonist"),
   regions: z
     .array(
       z.object({
         name: z.string().describe("Region name, e.g. Germany"),
         marketplace: z.string().describe("Marketplace identifier, e.g. amazon.de"),
         marketplaceUrl: z.string().describe("Full URL, e.g. https://www.amazon.de"),
-        baselinePrice: z.number().describe("Official price in this region"),
+        legitimatePrice: z.number().describe("Legitimate price in this region"),
         currency: z.string().describe("Currency code, e.g. EUR"),
+        requiresPrescription: z
+          .boolean()
+          .describe("Whether the region requires prescription verification"),
       })
     )
     .describe("Regions/marketplaces to investigate"),
-  protectedMarket: z
+  regulatoryContext: z
     .string()
-    .describe("The market to protect from unauthorized sellers, e.g. France"),
+    .describe("Regulatory context or target risk, e.g. unauthorized cross-border sales into the US"),
 });
 
 // TinyFish extraction result for a single listing
@@ -40,8 +45,9 @@ export const CaseGenerationSchema = z.object({
       title: z.string(),
       marketplace: z.string(),
       sellerName: z.string(),
-      priceDeviation: z.number(),
-      shippingVerified: z.boolean(),
+      riskScore: z.number(),
+      riskLevel: z.string(),
+      topRiskSignals: z.array(z.string()),
     })
   ),
   sellerDossierSummaries: z.array(
@@ -49,6 +55,7 @@ export const CaseGenerationSchema = z.object({
       clusterId: z.string(),
       sellerNames: z.array(z.string()),
       confidenceScore: z.number(),
+      networkRiskLevel: z.string(),
       summary: z.string(),
     })
   ),
@@ -57,6 +64,7 @@ export const CaseGenerationSchema = z.object({
       action: z.string(),
       priority: z.enum(["high", "medium", "low"]),
       detail: z.string(),
+      targetEntity: z.string(),
     })
   ),
 });

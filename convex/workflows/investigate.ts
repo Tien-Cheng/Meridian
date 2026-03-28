@@ -8,18 +8,19 @@ export const investigationWorkflow = workflow.define({
   args: {
     investigationId: v.id("investigations"),
     threadId: v.string(),
-    brand: v.string(),
-    sku: v.string(),
+    drugName: v.string(),
+    drugCategory: v.string(),
     regions: v.array(
       v.object({
         name: v.string(),
         marketplace: v.string(),
         marketplaceUrl: v.string(),
-        baselinePrice: v.number(),
+        legitimatePrice: v.number(),
         currency: v.string(),
+        requiresPrescription: v.boolean(),
       })
     ),
-    protectedMarket: v.string(),
+    regulatoryContext: v.string(),
   },
   handler: async (step, args): Promise<void> => {
     // Step 1: Update status to searching
@@ -40,8 +41,10 @@ export const investigationWorkflow = workflow.define({
             region: region.name,
             marketplace: region.marketplace,
             marketplaceUrl: region.marketplaceUrl,
-            searchQuery: `${args.brand} ${args.sku}`,
-            baselinePrice: region.baselinePrice,
+            searchQuery: [args.drugName, args.drugCategory]
+              .filter(Boolean)
+              .join(" "),
+            legitimatePrice: region.legitimatePrice,
             currency: region.currency,
           },
           { retry: true }
@@ -60,7 +63,7 @@ export const investigationWorkflow = workflow.define({
       {
         investigationId: args.investigationId,
         threadId: args.threadId,
-        protectedMarket: args.protectedMarket,
+        regulatoryContext: args.regulatoryContext,
       },
       { retry: true }
     );
@@ -86,7 +89,7 @@ export const investigationWorkflow = workflow.define({
       {
         investigationId: args.investigationId,
         threadId: args.threadId,
-        protectedMarket: args.protectedMarket,
+        regulatoryContext: args.regulatoryContext,
       },
       { retry: true }
     );
