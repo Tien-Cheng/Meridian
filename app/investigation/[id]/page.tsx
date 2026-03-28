@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -19,6 +20,9 @@ const InvestigationMap = dynamic(
 export default function InvestigationPage() {
   const { id } = useParams();
   const investigationId = id as Id<"investigations">;
+  const [selectedFindingId, setSelectedFindingId] = useState<
+    Id<"findings"> | null
+  >(null);
 
   const investigation = useQuery(api.functions.investigations.get, {
     id: investigationId,
@@ -61,13 +65,18 @@ export default function InvestigationPage() {
       <div className="flex-1 flex min-h-0">
         {/* Map area */}
         <div className="flex-1 relative grid-texture">
-          <InvestigationMap investigationId={investigationId} />
+          <InvestigationMap
+            investigationId={investigationId}
+            onSelectFinding={setSelectedFindingId}
+            selectedFindingId={selectedFindingId}
+          />
         </div>
 
         {/* Right panel */}
         <div className="w-[420px] border-l border-zinc-800 flex flex-col">
           <RightPanel
             investigationId={investigationId}
+            selectedFindingId={selectedFindingId}
             threadId={investigation.threadId}
           />
         </div>
