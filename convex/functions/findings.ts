@@ -115,6 +115,7 @@ export const updateShippingVerification = internalMutation({
     shipsInternationally: v.boolean(),
     shippingOrigin: v.optional(v.string()),
     shippingEvidence: v.optional(v.string()),
+    requiresPrescriptionCheck: v.optional(v.boolean()),
   },
   handler: async (ctx, { findingId, ...patch }) => {
     await ctx.db.patch(findingId, {
@@ -122,6 +123,14 @@ export const updateShippingVerification = internalMutation({
       shipsInternationally: patch.shipsInternationally,
       shippingOrigin: patch.shippingOrigin,
       shippingEvidence: patch.shippingEvidence,
+      requiresPrescriptionCheck: patch.requiresPrescriptionCheck,
     });
+  },
+});
+
+export const getById = internalQuery({
+  args: { findingId: v.id("findings") },
+  handler: async (ctx, { findingId }) => {
+    return await ctx.db.get(findingId);
   },
 });
