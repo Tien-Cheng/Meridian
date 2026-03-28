@@ -2,7 +2,12 @@ import { createTool, type ToolCtx } from "@convex-dev/agent";
 import { z } from "zod/v4";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
-import { callTinyFish, processTinyFishStream } from "../lib/tinyfish";
+import type { ActionCtx } from "../_generated/server";
+import {
+  callTinyFish,
+  processTinyFishStream,
+  type TinyFishPersistenceMeta,
+} from "../lib/tinyfish";
 import { getCoordinates } from "../lib/geocoding";
 
 const COUNTRY_TO_PROXY_CODE = new Map<string, string>([
@@ -54,6 +59,10 @@ export type ShippingVerificationResult = z.infer<
   typeof ShippingVerificationResultSchema
 >;
 type ShippingVerificationOutput = ShippingVerificationResult | string;
+type InvestigationToolCtx = ActionCtx & {
+  userId?: string;
+  threadId?: string;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -333,6 +342,33 @@ function parseShippingResult(
   return null;
 }
 
+async function resolveInvestigationContext(
+  ctx?: InvestigationToolCtx,
+  listingUrl?: string
+) {
+  if (!ctx?.threadId || !listingUrl) {
+    return { finding: null, investigation: null };
+  }
+
+  const investigation = await ctx.runQuery(
+    internal.functions.investigations.getByThread,
+    { threadId: ctx.threadId }
+  );
+  if (!investigation) {
+    return { investigation: null, finding: null };
+  }
+
+  const finding = await ctx.runQuery(
+    internal.functions.findings.getByInvestigationAndListingUrl,
+    {
+      investigationId: investigation._id,
+      listingUrl,
+    }
+  );
+
+  return { investigation, finding };
+}
+
 // ---------------------------------------------------------------------------
 // Tool
 // ---------------------------------------------------------------------------
@@ -349,139 +385,95 @@ export const verifyShipping = createTool({
       .describe("The country to check shipping to, e.g. France"),
     findingId: z
       .string()
+      .optional()
       .describe("The ID of the finding to update with verification results"),
   }),
   execute: async (
     ctx: ToolCtx,
     input
   ): Promise<ShippingVerificationOutput> => {
-    if (!process.env.TINYFISH_API_KEY) {
-      return "TinyFish API key is missing. Set TINYFISH_API_KEY before running shipping verification.";
-    }
-
-    // Look up the finding to get investigationId, region, riskLevel
-    const findingId = input.findingId as Id<"findings">;
-    const finding = await ctx.runQuery(internal.functions.findings.getById, {
-      findingId,
-    });
-    if (!finding) {
-      return `Finding ${input.findingId} not found in database.`;
-    }
-
-    const goal = buildShippingVerificationGoal(input);
-    const destinationProxyCode = COUNTRY_TO_PROXY_CODE.get(
-      input.protectedMarket
-    );
-
-    // Call TinyFish with stealth profile and destination-country proxy
-    let response: Response;
-    try {
-      response = await callTinyFish({
-        url: input.listingUrl,
-        goal,
-        browser_profile: "stealth",
-        proxy_config: {
-          enabled: true,
-          ...(destinationProxyCode
-            ? { country_code: destinationProxyCode }
-            : {}),
-        },
-      });
-    } catch (error) {
-      return `TinyFish request failed before shipping verification started: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return `TinyFish request failed with status ${response.status}: ${
-        errorText.trim() || response.statusText || "no response body"
-      }`;
-    }
-
-    // Process the SSE stream
-    let rawResult: unknown;
-    try {
-      rawResult = await processTinyFishStream(response);
-    } catch (error) {
-      return `TinyFish streaming failed during shipping verification: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    // Check for blocked / error patterns
-    const failure =
-      describeFailure(rawResult) ||
-      (typeof rawResult === "string"
-        ? (() => {
-            for (const candidate of extractJsonCandidates(rawResult)) {
-              try {
-                return describeFailure(JSON.parse(candidate) as unknown);
-              } catch {
-                continue;
-              }
-            }
-            return undefined;
-          })()
-        : undefined);
-    if (failure) {
-      return withCaptchaLimitHint(failure);
-    }
-
-    // Parse and normalize the result
-    const parsed = parseShippingResult(rawResult);
-
-    if (!parsed) {
-      const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
-      // Still mark as verified (attempted) even if unparseable
-      await ctx.runMutation(
-        internal.functions.findings.updateShippingVerification,
-        {
-          findingId,
-          shippingVerified: true,
-          shipsInternationally: false,
-          shippingEvidence: `Shipping verification attempted but no structured result could be parsed. Raw: ${rawSummary}`,
+    const finding = input.findingId
+      ? await ctx.runQuery(internal.functions.findings.getById, {
+          findingId: input.findingId as Id<"findings">,
+        })
+      : null;
+    const resolved = finding
+      ? {
+          finding,
+          investigation: await ctx.runQuery(
+            internal.functions.investigations.getInvestigationForCase,
+            { id: finding.investigationId }
+          ),
         }
-      );
-      return `Shipping verification completed but could not parse structured results.${
-        rawSummary ? ` Raw summary: ${rawSummary}` : ""
-      }`;
-    }
+      : await resolveInvestigationContext(ctx, input.listingUrl);
 
-    // Update the finding with shipping verification data
-    const shippingOrigin = parsed.shipsFrom ?? undefined;
-    await ctx.runMutation(
-      internal.functions.findings.updateShippingVerification,
+    const runId = crypto.randomUUID();
+    const result = await runVerifyShipping(
+      ctx,
       {
-        findingId,
-        shippingVerified: true,
-        shipsInternationally: parsed.canShip,
-        shippingOrigin,
-        shippingEvidence: parsed.evidence,
-        requiresPrescriptionCheck: parsed.prescriptionCheckInFlow,
-      }
+        listingUrl: input.listingUrl,
+        protectedMarket: input.protectedMarket,
+      },
+      resolved.investigation
+        ? {
+            investigationId: resolved.investigation._id,
+            findingId: resolved.finding?._id,
+            threadId: ctx.threadId,
+            sourceTool: "verifyShipping",
+            runId,
+          }
+        : undefined
     );
 
-    // If shipping confirmed, create a verified supply route
-    if (parsed.canShip) {
-      const fromRegion = shippingOrigin ?? finding.region;
+    if (!resolved.finding || typeof result === "string") {
+      return result;
+    }
+
+    const shippingOrigin = result.shipsFrom ?? undefined;
+    await ctx.runMutation(internal.functions.findings.updateShippingVerification, {
+      findingId: resolved.finding._id,
+      shippingVerified: true,
+      shipsInternationally: result.canShip,
+      shippingOrigin,
+      shippingEvidence: result.evidence,
+      requiresPrescriptionCheck: result.prescriptionCheckInFlow,
+    });
+
+    if (resolved.investigation) {
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: resolved.investigation._id,
+        findingId: resolved.finding._id,
+        threadId: ctx.threadId,
+        runId,
+        sourceTool: "verifyShipping",
+        eventType: "result",
+        statusLabel: `Shipping verification for ${resolved.finding.sellerName}`,
+        currentUrl: input.listingUrl,
+        summaryText: result.evidence,
+        payloadJson: JSON.stringify(result),
+        stepOrder: 10_000,
+        capturedAt: Date.now(),
+      });
+    }
+
+    if (result.canShip) {
+      const fromRegion = shippingOrigin ?? resolved.finding.region;
       const toRegion = input.protectedMarket;
       const fromCoords = getCoordinates(fromRegion);
       const toCoords = getCoordinates(toRegion);
-      const riskLevel = finding.riskLevel as
+      const riskLevel = resolved.finding.riskLevel as
         | "low"
         | "medium"
         | "high"
         | "critical";
 
-      const concern = parsed.prescriptionCheckInFlow
+      const concern = result.prescriptionCheckInFlow
         ? `Confirmed shipping from ${fromRegion} to ${toRegion}; checkout includes prescription verification`
         : `Rx drug shipped from ${fromRegion} to ${toRegion} without prescription verification`;
 
       await ctx.runMutation(internal.functions.routes.createRoute, {
-        investigationId: finding.investigationId,
-        findingId,
+        investigationId: resolved.finding.investigationId,
+        findingId: resolved.finding._id,
         fromRegion,
         fromLatitude: fromCoords.latitude,
         fromLongitude: fromCoords.longitude,
@@ -495,14 +487,7 @@ export const verifyShipping = createTool({
       });
     }
 
-    return {
-      canShip: parsed.canShip,
-      shipsFrom: parsed.shipsFrom,
-      shipsTo: parsed.shipsTo,
-      prescriptionCheckInFlow: parsed.prescriptionCheckInFlow,
-      shippingCost: parsed.shippingCost,
-      evidence: parsed.evidence,
-    };
+    return result;
   },
 });
 
@@ -510,10 +495,14 @@ export const verifyShipping = createTool({
  * Standalone version of verifyShipping that can be called from internalActions
  * without requiring a ToolCtx. Skips DB updates (caller is responsible).
  */
-export async function runVerifyShipping(input: {
-  listingUrl: string;
-  protectedMarket: string;
-}): Promise<ShippingVerificationResult | string> {
+export async function runVerifyShipping(
+  ctx: InvestigationToolCtx | undefined,
+  input: {
+    listingUrl: string;
+    protectedMarket: string;
+  },
+  persistence?: Omit<TinyFishPersistenceMeta, "createArtifactFn">
+): Promise<ShippingVerificationResult | string> {
   if (!process.env.TINYFISH_API_KEY) {
     return "TinyFish API key is missing. Set TINYFISH_API_KEY before running shipping verification.";
   }
@@ -551,7 +540,25 @@ export async function runVerifyShipping(input: {
 
   let rawResult: unknown;
   try {
-    rawResult = await processTinyFishStream(response);
+    rawResult = await processTinyFishStream(
+      response,
+      ctx,
+      persistence
+        ? {
+            investigationId: persistence.investigationId,
+            agentIndex: persistence.agentIndex ?? 0,
+            region: input.protectedMarket,
+          }
+        : undefined,
+      persistence ? internal.functions.monitor.updateAgent : undefined,
+      persistence ? ctx : undefined,
+      persistence
+        ? {
+            ...persistence,
+            createArtifactFn: internal.functions.evidence.createArtifact,
+          }
+        : undefined
+    );
   } catch (error) {
     return `TinyFish streaming failed: ${
       error instanceof Error ? error.message : "unknown error"

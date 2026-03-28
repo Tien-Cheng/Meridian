@@ -1,7 +1,13 @@
-import { createTool, type ToolCtx } from "@convex-dev/agent";
+import { createTool } from "@convex-dev/agent";
 import { z } from "zod/v4";
+import { internal } from "../_generated/api";
+import type { ActionCtx } from "../_generated/server";
 import { extractorAgent } from "../agents/extractor";
-import { callTinyFish, processTinyFishStream } from "../lib/tinyfish";
+import {
+  callTinyFish,
+  processTinyFishStream,
+  type TinyFishPersistenceMeta,
+} from "../lib/tinyfish";
 
 const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
   ["amazon.com", "US"],
@@ -72,6 +78,10 @@ const LooseInspectListingResultSchema = z.object({
 
 export type InspectListingResult = z.infer<typeof InspectListingResultSchema>;
 type InspectListingOutput = InspectListingResult | string;
+type InvestigationToolCtx = ActionCtx & {
+  userId?: string;
+  threadId?: string;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -585,7 +595,7 @@ function parseStructuredCandidate(
 }
 
 async function normalizeWithExtractor(
-  ctx: ToolCtx,
+  ctx: InvestigationToolCtx,
   input: { listingUrl: string; marketplace: string; region: string },
   rawResult: unknown
 ): Promise<InspectListingResult | null> {
@@ -626,6 +636,33 @@ function getProxyCountryCode(listingUrl: string): string | undefined {
   }
 }
 
+async function resolveInvestigationContext(
+  ctx?: InvestigationToolCtx,
+  listingUrl?: string
+) {
+  if (!ctx?.threadId) {
+    return { finding: null, investigation: null };
+  }
+
+  const investigation = await ctx.runQuery(
+    internal.functions.investigations.getByThread,
+    { threadId: ctx.threadId }
+  );
+  if (!investigation || !listingUrl) {
+    return { investigation, finding: null };
+  }
+
+  const finding = await ctx.runQuery(
+    internal.functions.findings.getByInvestigationAndListingUrl,
+    {
+      investigationId: investigation._id,
+      listingUrl,
+    }
+  );
+
+  return { investigation, finding };
+}
+
 export const inspectListing = createTool({
   description:
     "Open a specific listing page and extract detailed seller info, images, and shipping details",
@@ -637,82 +674,64 @@ export const inspectListing = createTool({
     region: z.string().describe("The marketplace region, e.g. Germany"),
   }),
   execute: async (ctx, input): Promise<InspectListingOutput> => {
-    if (!process.env.TINYFISH_API_KEY) {
-      return "TinyFish API key is missing. Set TINYFISH_API_KEY before running listing inspection.";
-    }
+    const { investigation, finding } = await resolveInvestigationContext(
+      ctx,
+      input.listingUrl
+    );
+    const runId = crypto.randomUUID();
+    const result = await runInspectListing(
+      ctx,
+      input,
+      investigation
+        ? {
+            investigationId: investigation._id,
+            findingId: finding?._id,
+            threadId: ctx.threadId,
+            sourceTool: "inspectListing",
+            runId,
+          }
+        : undefined
+    );
 
-    const goal = buildInspectGoal(input);
-    const proxyCountryCode = getProxyCountryCode(input.listingUrl);
-
-    let response: Response;
-    try {
-      response = await callTinyFish({
-        url: input.listingUrl,
-        goal,
-        browser_profile: "stealth",
-        proxy_config: {
-          enabled: true,
-          ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
-        },
+    if (
+      investigation &&
+      finding &&
+      typeof result !== "string"
+    ) {
+      await ctx.runMutation(internal.functions.findings.enrichFinding, {
+        findingId: finding._id,
+        sellerStorefrontUrl: result.sellerStorefrontUrl ?? undefined,
+        imageUrls: result.imageUrls.length > 0 ? result.imageUrls : undefined,
+        productDescription: result.productDescription ?? undefined,
+        hasPharmacyCredentials: result.pharmacyBadgeVisible ?? undefined,
+        prescriptionRequired: result.prescriptionRequired ?? undefined,
+        batchNumber: result.batchNumber ?? undefined,
+        batchNumberVisible: result.batchNumber != null ? true : undefined,
+        expiryDate: result.expiryDate ?? undefined,
+        expiryDateVisible: result.expiryDate != null ? true : undefined,
+        sellerRating: result.sellerRating ?? undefined,
+        sellerAccountAge: result.sellerAccountAge ?? undefined,
+        shippingEvidence: result.shippingInfo ?? undefined,
+        enrichedAt: Date.now(),
       });
-    } catch (error) {
-      return `TinyFish request failed before listing inspection started: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: investigation._id,
+        findingId: finding._id,
+        threadId: ctx.threadId,
+        runId,
+        sourceTool: "inspectListing",
+        eventType: "result",
+        statusLabel: `Inspection result for ${result.sellerName}`,
+        currentUrl: input.listingUrl,
+        summaryText:
+          result.productDescription ?? result.shippingInfo ?? result.productTitle ?? "Listing inspection completed.",
+        payloadJson: JSON.stringify(result),
+        stepOrder: 10_000,
+        capturedAt: Date.now(),
+      });
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      return `TinyFish request failed with status ${response.status}: ${
-        errorText.trim() || response.statusText || "no response body"
-      }`;
-    }
-
-    let rawResult: unknown;
-    try {
-      rawResult = await processTinyFishStream(response);
-    } catch (error) {
-      return `TinyFish streaming run failed while inspecting listing: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    const failure =
-      describeFailure(rawResult) ||
-      (typeof rawResult === "string"
-        ? (() => {
-            for (const candidate of extractJsonCandidates(rawResult)) {
-              try {
-                return describeFailure(JSON.parse(candidate) as unknown);
-              } catch {
-                continue;
-              }
-            }
-            return undefined;
-          })()
-        : undefined);
-    if (failure) {
-      return withCaptchaLimitHint(failure);
-    }
-
-    const normalized = parseStructuredCandidate(rawResult, input);
-    if (normalized) {
-      return normalized;
-    }
-
-    try {
-      const extracted = await normalizeWithExtractor(ctx, input, rawResult);
-      if (extracted) {
-        return extracted;
-      }
-    } catch (error) {
-      return `TinyFish returned unstructured listing output and extractor normalization failed: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
-    return `TinyFish completed listing inspection but no structured seller details could be extracted.${rawSummary ? ` Raw summary: ${rawSummary}` : ""}`;
+    return result;
   },
 });
 
@@ -720,11 +739,15 @@ export const inspectListing = createTool({
  * Standalone version of inspectListing that can be called from internalActions
  * without requiring a ToolCtx. Skips the extractor agent fallback.
  */
-export async function runInspectListing(input: {
-  listingUrl: string;
-  marketplace: string;
-  region: string;
-}): Promise<InspectListingResult | string> {
+export async function runInspectListing(
+  ctx: InvestigationToolCtx | undefined,
+  input: {
+    listingUrl: string;
+    marketplace: string;
+    region: string;
+  },
+  persistence?: Omit<TinyFishPersistenceMeta, "createArtifactFn">
+): Promise<InspectListingResult | string> {
   if (!process.env.TINYFISH_API_KEY) {
     return "TinyFish API key is missing. Set TINYFISH_API_KEY before running listing inspection.";
   }
@@ -756,7 +779,25 @@ export async function runInspectListing(input: {
 
   let rawResult: unknown;
   try {
-    rawResult = await processTinyFishStream(response);
+    rawResult = await processTinyFishStream(
+      response,
+      ctx,
+      persistence
+        ? {
+            investigationId: persistence.investigationId,
+            agentIndex: persistence.agentIndex ?? 0,
+            region: input.region,
+          }
+        : undefined,
+      persistence ? internal.functions.monitor.updateAgent : undefined,
+      persistence ? ctx : undefined,
+      persistence
+        ? {
+            ...persistence,
+            createArtifactFn: internal.functions.evidence.createArtifact,
+          }
+        : undefined
+    );
   } catch (error) {
     return `TinyFish streaming failed: ${error instanceof Error ? error.message : "unknown error"}`;
   }
@@ -784,6 +825,20 @@ export async function runInspectListing(input: {
     return normalized;
   }
 
+  if (!ctx) {
+    const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+    return `TinyFish completed but no structured details extracted.${rawSummary ? ` Raw: ${rawSummary}` : ""}`;
+  }
+
   const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+  try {
+    const extracted = await normalizeWithExtractor(ctx, input, rawResult);
+    if (extracted) {
+      return extracted;
+    }
+  } catch {
+    // Fall through to the raw summary message below.
+  }
+
   return `TinyFish completed but no structured details extracted.${rawSummary ? ` Raw: ${rawSummary}` : ""}`;
 }

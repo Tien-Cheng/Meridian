@@ -134,3 +134,18 @@ export const getById = internalQuery({
     return await ctx.db.get(findingId);
   },
 });
+
+export const getByInvestigationAndListingUrl = internalQuery({
+  args: {
+    investigationId: v.id("investigations"),
+    listingUrl: v.string(),
+  },
+  handler: async (ctx, { investigationId, listingUrl }) => {
+    return await ctx.db
+      .query("findings")
+      .withIndex("by_investigation_and_listing", (q) =>
+        q.eq("investigationId", investigationId).eq("listingUrl", listingUrl)
+      )
+      .unique();
+  },
+});

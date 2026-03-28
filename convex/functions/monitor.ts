@@ -4,21 +4,12 @@ import { v } from "convex/values";
 export const listByInvestigation = query({
   args: { investigationId: v.id("investigations") },
   handler: async (ctx, { investigationId }) => {
-    const monitors = await ctx.db
+    return await ctx.db
       .query("agentMonitor")
       .withIndex("by_investigation", (q) =>
         q.eq("investigationId", investigationId)
       )
       .collect();
-
-    return Promise.all(
-      monitors.map(async (m) => ({
-        ...m,
-        screenshotUrl: m.screenshotUrl
-          ? await ctx.storage.getUrl(m.screenshotUrl)
-          : null,
-      }))
-    );
   },
 });
 
@@ -61,11 +52,10 @@ export const updateAgent = internalMutation({
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("agentMonitor")
-      .withIndex("by_investigation", (q) =>
-        q.eq("investigationId", args.investigationId)
+      .withIndex("by_investigation_and_agent", (q) =>
+        q.eq("investigationId", args.investigationId).eq("agentIndex", args.agentIndex)
       )
-      .filter((q) => q.eq(q.field("agentIndex"), args.agentIndex))
-      .first();
+      .unique();
 
     if (existing) {
       await ctx.db.patch(existing._id, {

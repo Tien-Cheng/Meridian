@@ -20,6 +20,10 @@ import {
 import { runSellerClustering } from "../tools/clusterSellers";
 import { runCaseGeneration } from "../tools/generateCaseFile";
 import { runInspectListing } from "../tools/inspectListing";
+import { runSearchMarketplace } from "../tools/searchMarketplace";
+import { runVerifyShipping } from "../tools/verifyShipping";
+import { runCrawlStorefront } from "../tools/crawlStorefront";
+import { ensureFindingForListing } from "../lib/investigationEvidence";
 
 type GeneratedCase = Awaited<ReturnType<typeof runCaseGeneration>>;
 
@@ -170,6 +174,16 @@ export const get = query({
   args: { id: v.id("investigations") },
   handler: async (ctx, { id }) => {
     return await ctx.db.get(id);
+  },
+});
+
+export const getByThread = internalQuery({
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) => {
+    return await ctx.db
+      .query("investigations")
+      .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+      .unique();
   },
 });
 
@@ -405,9 +419,98 @@ export const searchRegion = internalAction({
     searchQuery: v.string(),
     legitimatePrice: v.number(),
     currency: v.string(),
+    requiresPrescription: v.optional(v.boolean()),
   },
-  handler: async () => {
-    // TODO: implement TinyFish marketplace search + findings creation
+  handler: async (ctx, args) => {
+    const runId = crypto.randomUUID();
+
+    await ctx.runMutation(internal.functions.monitor.initAgent, {
+      investigationId: args.investigationId,
+      agentIndex: args.agentIndex,
+      region: args.region,
+      marketplace: args.marketplace,
+    });
+
+    const result = await runSearchMarketplace(
+      ctx,
+      {
+        marketplaceUrl: args.marketplaceUrl,
+        searchQuery: args.searchQuery,
+        region: args.region,
+        baselinePrice: args.legitimatePrice,
+        currency: args.currency,
+        requiresPrescription: args.requiresPrescription,
+      },
+      {
+        investigationId: args.investigationId,
+        threadId: args.threadId,
+        agentIndex: args.agentIndex,
+        sourceTool: "searchMarketplace",
+        runId,
+      }
+    );
+
+    if (typeof result === "string") {
+      await ctx.runMutation(internal.functions.monitor.updateAgent, {
+        investigationId: args.investigationId,
+        agentIndex: args.agentIndex,
+        status: "error",
+        statusLabel: result.slice(0, 120),
+      });
+      return { findingsCreated: 0, error: result };
+    }
+
+    let findingsCreated = 0;
+
+    for (const [index, listing] of result.entries()) {
+      const ensured = await ensureFindingForListing(ctx, {
+        investigationId: args.investigationId,
+        threadId: args.threadId,
+        marketplace: args.marketplace,
+        region: args.region,
+        legitimatePrice: args.legitimatePrice,
+        requiresPrescription: args.requiresPrescription,
+        listing,
+      });
+
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: args.investigationId,
+        findingId: ensured.findingId,
+        threadId: args.threadId,
+        agentIndex: args.agentIndex,
+        runId,
+        sourceTool: "searchMarketplace",
+        eventType: "result",
+        statusLabel: `Search result: ${listing.title}`,
+        currentUrl: listing.listingUrl,
+        summaryText: `${listing.sellerName} on ${args.marketplace} at ${listing.currency} ${listing.price.toFixed(2)}`,
+        payloadJson: JSON.stringify({
+          listing,
+          risk: ensured.risk,
+        }),
+        stepOrder: 10_000 + index,
+        capturedAt: Date.now(),
+      });
+
+      await ctx.runMutation(internal.functions.evidence.cloneRunArtifactsToFinding, {
+        investigationId: args.investigationId,
+        runId,
+        findingId: ensured.findingId,
+      });
+
+      if (ensured.created) {
+        findingsCreated += 1;
+      }
+    }
+
+    await ctx.runMutation(internal.functions.monitor.updateAgent, {
+      investigationId: args.investigationId,
+      agentIndex: args.agentIndex,
+      status: "completed",
+      statusLabel: `Search complete: ${result.length} listings, ${findingsCreated} new findings`,
+    });
+
+    return { findingsCreated, listingsFound: result.length };
   },
 });
 
@@ -418,6 +521,13 @@ export const deepInvestigate = internalAction({
     regulatoryContext: v.string(),
   },
   handler: async (ctx, args) => {
+    const investigation = await ctx.runQuery(
+      internal.functions.investigations.getInvestigationForCase,
+      { id: args.investigationId }
+    );
+    const protectedMarket =
+      investigation?.protectedMarket?.trim() || args.regulatoryContext || "target market";
+
     // Update monitor status to "inspecting"
     await ctx.runMutation(internal.functions.monitor.updateAgent, {
       investigationId: args.investigationId,
@@ -443,6 +553,7 @@ export const deepInvestigate = internalAction({
 
     // Inspect top 3 findings and enrich with seller details
     for (const finding of top3) {
+      const inspectRunId = crypto.randomUUID();
       await ctx.runMutation(internal.functions.monitor.updateAgent, {
         investigationId: args.investigationId,
         agentIndex: 0,
@@ -453,11 +564,22 @@ export const deepInvestigate = internalAction({
 
       // Call inspectListing logic (catch errors per requirement)
       try {
-        const result = await runInspectListing({
-          listingUrl: finding.listingUrl,
-          marketplace: finding.marketplace,
-          region: finding.region,
-        });
+        const result = await runInspectListing(
+          ctx,
+          {
+            listingUrl: finding.listingUrl,
+            marketplace: finding.marketplace,
+            region: finding.region,
+          },
+          {
+            investigationId: args.investigationId,
+            findingId: finding._id,
+            threadId: args.threadId,
+            agentIndex: 0,
+            sourceTool: "inspectListing",
+            runId: inspectRunId,
+          }
+        );
 
         if (typeof result !== "string") {
           // Enrich finding with inspection data
@@ -484,7 +606,103 @@ export const deepInvestigate = internalAction({
             shippingEvidence: result.shippingInfo ?? undefined,
             enrichedAt: Date.now(),
           });
+          await ctx.runMutation(internal.functions.evidence.createArtifact, {
+            investigationId: args.investigationId,
+            findingId: finding._id,
+            threadId: args.threadId,
+            agentIndex: 0,
+            runId: inspectRunId,
+            sourceTool: "inspectListing",
+            eventType: "result",
+            statusLabel: `Inspection result for ${finding.sellerName}`,
+            currentUrl: finding.listingUrl,
+            summaryText: result.productDescription ?? result.shippingInfo ?? result.productTitle ?? "Listing inspection completed.",
+            payloadJson: JSON.stringify(result),
+            stepOrder: 10_000,
+            capturedAt: Date.now(),
+          });
           inspectedCount++;
+
+          const shippingRunId = crypto.randomUUID();
+          const shippingResult = await runVerifyShipping(
+            ctx,
+            {
+              listingUrl: finding.listingUrl,
+              protectedMarket,
+            },
+            {
+              investigationId: args.investigationId,
+              findingId: finding._id,
+              threadId: args.threadId,
+              agentIndex: 0,
+              sourceTool: "verifyShipping",
+              runId: shippingRunId,
+            }
+          );
+
+          if (typeof shippingResult !== "string") {
+            await ctx.runMutation(internal.functions.findings.updateShippingVerification, {
+              findingId: finding._id,
+              shippingVerified: true,
+              shipsInternationally: shippingResult.canShip,
+              shippingOrigin: shippingResult.shipsFrom ?? undefined,
+              shippingEvidence: shippingResult.evidence,
+              requiresPrescriptionCheck: shippingResult.prescriptionCheckInFlow,
+            });
+
+            await ctx.runMutation(internal.functions.evidence.createArtifact, {
+              investigationId: args.investigationId,
+              findingId: finding._id,
+              threadId: args.threadId,
+              agentIndex: 0,
+              runId: shippingRunId,
+              sourceTool: "verifyShipping",
+              eventType: "result",
+              statusLabel: `Shipping verification for ${finding.sellerName}`,
+              currentUrl: finding.listingUrl,
+              summaryText: shippingResult.evidence,
+              payloadJson: JSON.stringify(shippingResult),
+              stepOrder: 10_000,
+              capturedAt: Date.now(),
+            });
+          }
+
+          if (result.sellerStorefrontUrl) {
+            const crawlRunId = crypto.randomUUID();
+            const crawlResult = await runCrawlStorefront(
+              ctx,
+              {
+                sellerStorefrontUrl: result.sellerStorefrontUrl,
+                brandName: investigation?.brand?.trim() || investigation?.drugName?.trim() || finding.title,
+              },
+              {
+                investigationId: args.investigationId,
+                findingId: finding._id,
+                threadId: args.threadId,
+                agentIndex: 0,
+                sourceTool: "crawlStorefront",
+                runId: crawlRunId,
+              }
+            );
+
+            if (typeof crawlResult !== "string") {
+              await ctx.runMutation(internal.functions.evidence.createArtifact, {
+                investigationId: args.investigationId,
+                findingId: finding._id,
+                threadId: args.threadId,
+                agentIndex: 0,
+                runId: crawlRunId,
+                sourceTool: "crawlStorefront",
+                eventType: "result",
+                statusLabel: `Storefront crawl for ${finding.sellerName}`,
+                currentUrl: result.sellerStorefrontUrl,
+                summaryText: `${crawlResult.length} related storefront listings captured.`,
+                payloadJson: JSON.stringify(crawlResult),
+                stepOrder: 10_000,
+                capturedAt: Date.now(),
+              });
+            }
+          }
         } else {
           console.warn(
             `inspectListing returned error for ${finding._id}: ${result}`
@@ -499,11 +717,15 @@ export const deepInvestigate = internalAction({
       }
 
       // Create supply route for this finding
-      const fromRegion = finding.shippingOrigin ?? finding.region;
+      const refreshedFinding = await ctx.runQuery(internal.functions.findings.getById, {
+        findingId: finding._id,
+      });
+      const fromRegion =
+        refreshedFinding?.shippingOrigin ?? refreshedFinding?.region ?? finding.region;
       const fromCoords = getCoordinates(fromRegion);
       const toCoords = getCoordinates(finding.region);
       const concern =
-        finding.riskSignals
+        (refreshedFinding?.riskSignals ?? finding.riskSignals)
           .slice(0, 3)
           .map((s) => s.label || s.signal)
           .join("; ") || `${finding.riskLevel} risk listing`;
@@ -517,9 +739,11 @@ export const deepInvestigate = internalAction({
         toRegion: finding.region,
         toLatitude: toCoords.latitude,
         toLongitude: toCoords.longitude,
-        verified: false,
-        verificationMethod: "risk_signal_heuristic",
-        riskLevel: finding.riskLevel as
+        verified: Boolean(refreshedFinding?.shipsInternationally),
+        verificationMethod: refreshedFinding?.shippingVerified
+          ? "cart_shipping_check"
+          : "risk_signal_heuristic",
+        riskLevel: (refreshedFinding?.riskLevel ?? finding.riskLevel) as
           | "low"
           | "medium"
           | "high"
@@ -609,6 +833,17 @@ export const clusterSellersAction = internalAction({
     });
 
     if (clustering.clusters.length === 0) {
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: args.investigationId,
+        threadId: args.threadId,
+        sourceTool: "clusterSellers",
+        eventType: "result",
+        statusLabel: "Seller clustering returned no related seller clusters",
+        summaryText: "No related seller networks were identified from the current findings.",
+        payloadJson: JSON.stringify(clustering),
+        stepOrder: 1,
+        capturedAt: Date.now(),
+      });
       return { clusters: 0, dossiersCreated: 0 };
     }
 
@@ -627,6 +862,20 @@ export const clusterSellersAction = internalAction({
     }
 
     let dossiersCreated = 0;
+    const clusteringRunId = crypto.randomUUID();
+
+    await ctx.runMutation(internal.functions.evidence.createArtifact, {
+      investigationId: args.investigationId,
+      threadId: args.threadId,
+      runId: clusteringRunId,
+      sourceTool: "clusterSellers",
+      eventType: "result",
+      statusLabel: "Seller clustering completed",
+      summaryText: `${clustering.clusters.length} cluster candidates generated from current findings.`,
+      payloadJson: JSON.stringify(clustering),
+      stepOrder: 1,
+      capturedAt: Date.now(),
+    });
 
     for (const [index, cluster] of clustering.clusters.entries()) {
       const mappedSellerNames = uniqueStrings(
@@ -690,6 +939,19 @@ export const clusterSellersAction = internalAction({
           cluster.networkRiskLevel ||
           networkRiskFromConfidence(cluster.confidenceScore),
         activeCountries,
+      });
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: args.investigationId,
+        clusterId: cluster.clusterId || `cluster-${index + 1}`,
+        threadId: args.threadId,
+        runId: clusteringRunId,
+        sourceTool: "clusterSellers",
+        eventType: "result",
+        statusLabel: `Seller cluster ${cluster.clusterId || `cluster-${index + 1}`}`,
+        summaryText: `${mappedSellerNames.join(" / ")} linked with ${Math.round(cluster.confidenceScore * 100)}% confidence.`,
+        payloadJson: JSON.stringify(cluster),
+        stepOrder: 10 + index,
+        capturedAt: Date.now(),
       });
       dossiersCreated += 1;
     }
