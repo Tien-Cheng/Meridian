@@ -28,6 +28,7 @@ export default defineSchema({
     regulatoryContext: v.optional(v.string()),
     protectedMarket: v.optional(v.string()),
     status: v.union(
+      v.literal("configuring"),
       v.literal("pending"),
       v.literal("searching"),
       v.literal("investigating"),
@@ -124,7 +125,12 @@ export default defineSchema({
     streamingUrl: v.optional(v.string()),
     currentUrl: v.optional(v.string()),
     updatedAt: v.number(),
-  }).index("by_investigation", ["investigationId"]),
+  })
+    .index("by_investigation", ["investigationId"])
+    .index("by_investigation_and_agent_index", [
+      "investigationId",
+      "agentIndex",
+    ]),
 
   // Seller dossiers (clustered seller profiles)
   sellerDossiers: defineTable({

@@ -17,12 +17,12 @@ async function findMonitor(
   investigationId: Id<"investigations">,
   agentIndex: number
 ) {
-  const monitors = await ctx.db
+  return await ctx.db
     .query("agentMonitor")
-    .withIndex("by_investigation", (q) => q.eq("investigationId", investigationId))
-    .collect();
-
-  return monitors.find((monitor) => monitor.agentIndex === agentIndex) ?? null;
+    .withIndex("by_investigation_and_agent_index", (q) =>
+      q.eq("investigationId", investigationId).eq("agentIndex", agentIndex)
+    )
+    .unique();
 }
 
 async function resolveUrl(
