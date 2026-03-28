@@ -768,18 +768,25 @@ export const deepInvestigate = internalAction({
     regulatoryContext: v.string(),
   },
   handler: async (ctx, args) => {
-    const findings: Doc<"findings">[] = await ctx.runQuery(
-      internal.functions.investigations.listFindingsForInvestigation,
-      { investigationId: args.investigationId }
-    );
-    const investigation: Doc<"investigations"> | null = await ctx.runQuery(
-      internal.functions.investigations.getInvestigationForCase,
-      { id: args.investigationId }
-    );
-    const existingRoutes: Doc<"supplyRoutes">[] = await ctx.runQuery(
-      internal.functions.investigations.listSupplyRoutesForInvestigation,
-      { investigationId: args.investigationId }
-    );
+    const [highRiskFindings, investigation, existingRoutes]: [
+      Doc<"findings">[],
+      Doc<"investigations"> | null,
+      Doc<"supplyRoutes">[],
+    ] = await Promise.all([
+      ctx.runQuery(internal.functions.findings.listHighRiskFindings, {
+        investigationId: args.investigationId,
+      }),
+      ctx.runQuery(internal.functions.investigations.getInvestigationForCase, {
+        id: args.investigationId,
+      }),
+      ctx.runQuery(
+        internal.functions.investigations.listSupplyRoutesForInvestigation,
+        {
+          investigationId: args.investigationId,
+        }
+      ),
+    ]);
+
     const existingRouteFindingIds = new Set(
       existingRoutes.map((route) => route.findingId)
     );
@@ -791,21 +798,23 @@ export const deepInvestigate = internalAction({
       investigation?.regions[0]?.name ||
       args.regulatoryContext;
 
-    const targets = findings
-      .filter((finding) =>
-        finding.riskLevel === "high" || finding.riskLevel === "critical"
-      )
+    const targets = [...highRiskFindings]
       .sort((a, b) => b.riskScore - a.riskScore)
       .slice(0, 3);
 
+    let inspectedCount = 0;
+    let routesCreated = 0;
+
     for (const finding of targets) {
       const agentIndex = regionToAgentIndex.get(finding.region);
+
       if (agentIndex !== undefined) {
         await ctx.runMutation(internal.functions.monitor.updateAgent, {
           investigationId: args.investigationId,
           agentIndex,
           status: "inspecting",
           statusLabel: `Inspecting ${finding.sellerName}`,
+          currentUrl: finding.listingUrl,
         });
       }
 
@@ -815,12 +824,42 @@ export const deepInvestigate = internalAction({
           marketplace: finding.marketplace,
           region: finding.region,
         });
+        inspectedCount += 1;
+
+        await ctx.runMutation(internal.functions.findings.enrichFinding, {
+          findingId: finding._id,
+          sellerStorefrontUrl: inspection.sellerStorefrontUrl,
+          imageUrls:
+            inspection.imageUrls && inspection.imageUrls.length > 0
+              ? inspection.imageUrls
+              : undefined,
+          productDescription: inspection.productDescriptionSnippet,
+          hasPharmacyCredentials: inspection.pharmacyBadgeVisible,
+          prescriptionRequired: inspection.prescriptionRequired,
+          batchNumber: inspection.batchNumber,
+          batchNumberVisible:
+            inspection.batchNumber !== undefined
+              ? Boolean(inspection.batchNumber)
+              : undefined,
+          expiryDate: inspection.expiryDate,
+          expiryDateVisible:
+            inspection.expiryDate !== undefined
+              ? Boolean(inspection.expiryDate)
+              : undefined,
+          sellerRating: inspection.sellerRating,
+          sellerAccountAge: inspection.sellerAccountAge,
+          shippingEvidence: inspection.shippingInfo,
+          enrichedAt: Date.now(),
+        });
 
         await ctx.runMutation(internal.functions.findings.enrichFromInspection, {
           findingId: finding._id,
           title: inspection.title,
           sellerName: inspection.sellerName,
-          imageUrls: inspection.imageUrls,
+          imageUrls:
+            inspection.imageUrls && inspection.imageUrls.length > 0
+              ? inspection.imageUrls
+              : undefined,
           hasPharmacyCredentials: inspection.pharmacyBadgeVisible,
           requiresPrescriptionCheck: inspection.prescriptionRequired,
           prescriptionRequired: inspection.prescriptionRequired,
@@ -839,20 +878,28 @@ export const deepInvestigate = internalAction({
         let shippingVerified = false;
         let shipsInternationally = false;
         let shippingEvidence = inspection.shippingInfo;
+        let requiresPrescriptionCheck = inspection.prescriptionRequired;
 
-        try {
-          const shippingCheck = await runShippingVerification({
-            listingUrl: finding.listingUrl,
-            protectedMarket,
+        if (agentIndex !== undefined) {
+          await ctx.runMutation(internal.functions.monitor.updateAgent, {
+            investigationId: args.investigationId,
+            agentIndex,
+            status: "checking_shipping",
+            statusLabel: `Checking shipping for ${finding.sellerName}`,
+            currentUrl: finding.listingUrl,
           });
-          shippingOrigin = shippingCheck.shippingOrigin ?? shippingOrigin;
-          shippingVerified = shippingCheck.shippingVerified;
-          shipsInternationally = shippingCheck.shipsInternationally;
-          shippingEvidence = shippingCheck.evidence;
-        } catch {
-          shippingVerified = false;
-          shipsInternationally = false;
         }
+
+        const shippingCheck = await runShippingVerification({
+          listingUrl: finding.listingUrl,
+          protectedMarket,
+        });
+        shippingOrigin = shippingCheck.shippingOrigin ?? shippingOrigin;
+        shippingVerified = shippingCheck.shippingVerified;
+        shipsInternationally = shippingCheck.shipsInternationally;
+        shippingEvidence = shippingCheck.evidence;
+        requiresPrescriptionCheck =
+          shippingCheck.requiresPrescriptionCheck ?? requiresPrescriptionCheck;
 
         await ctx.runMutation(
           internal.functions.findings.updateShippingVerification,
@@ -862,6 +909,7 @@ export const deepInvestigate = internalAction({
             shipsInternationally,
             shippingOrigin,
             shippingEvidence,
+            requiresPrescriptionCheck,
           }
         );
 
@@ -889,6 +937,7 @@ export const deepInvestigate = internalAction({
               concern: summarizeConcern(finding, shippingOrigin),
             });
             existingRouteFindingIds.add(finding._id);
+            routesCreated += 1;
           }
         }
 
@@ -898,6 +947,7 @@ export const deepInvestigate = internalAction({
             agentIndex,
             status: "completed",
             statusLabel: `Inspected ${finding.sellerName}`,
+            currentUrl: finding.listingUrl,
           });
         }
       } catch (error) {
@@ -908,12 +958,13 @@ export const deepInvestigate = internalAction({
             status: "error",
             statusLabel:
               error instanceof Error ? error.message : "Inspection failed",
+            currentUrl: finding.listingUrl,
           });
         }
       }
     }
 
-    return { inspected: targets.length };
+    return { inspected: inspectedCount, routesCreated };
   },
 });
 
