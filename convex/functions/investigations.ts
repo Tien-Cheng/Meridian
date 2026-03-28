@@ -696,7 +696,7 @@ export const deepInvestigate = internalAction({
                 eventType: "result",
                 statusLabel: `Storefront crawl for ${finding.sellerName}`,
                 currentUrl: result.sellerStorefrontUrl,
-                summaryText: `${crawlResult.length} related storefront listings captured.`,
+                summaryText: `${crawlResult.listings.length} related storefront listings captured.`,
                 payloadJson: JSON.stringify(crawlResult),
                 stepOrder: 10_000,
                 capturedAt: Date.now(),
