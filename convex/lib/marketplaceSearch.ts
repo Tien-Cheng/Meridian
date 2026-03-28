@@ -614,7 +614,7 @@ function shouldRetryWithStealth(message: string): boolean {
   const normalized = message.trim();
   return (
     looksBlocked(normalized) ||
-    /captcha|anti-bot|access denied|browser slot|browser session|timed out waiting for tinyfish browser slot/i.test(
+    /captcha|anti-bot|access denied|browser slot|browser session|timed out waiting for tinyfish browser slot|could not find public function/i.test(
       normalized
     )
   );
