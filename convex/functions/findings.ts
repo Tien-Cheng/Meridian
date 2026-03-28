@@ -1,4 +1,4 @@
-import { query, internalMutation } from "../_generated/server";
+import { query, internalMutation, internalQuery } from "../_generated/server";
 import { v } from "convex/values";
 
 export const create = internalMutation({
@@ -56,6 +56,55 @@ export const listByInvestigation = query({
         q.eq("investigationId", investigationId)
       )
       .collect();
+  },
+});
+
+export const listHighRiskFindings = internalQuery({
+  args: { investigationId: v.id("investigations") },
+  handler: async (ctx, { investigationId }) => {
+    const [highFindings, criticalFindings] = await Promise.all([
+      ctx.db
+        .query("findings")
+        .withIndex("by_risk", (q) =>
+          q.eq("investigationId", investigationId).eq("riskLevel", "high")
+        )
+        .collect(),
+      ctx.db
+        .query("findings")
+        .withIndex("by_risk", (q) =>
+          q.eq("investigationId", investigationId).eq("riskLevel", "critical")
+        )
+        .collect(),
+    ]);
+    return [...criticalFindings, ...highFindings];
+  },
+});
+
+export const enrichFinding = internalMutation({
+  args: {
+    findingId: v.id("findings"),
+    sellerStorefrontUrl: v.optional(v.string()),
+    imageUrls: v.optional(v.array(v.string())),
+    productDescription: v.optional(v.string()),
+    hasPharmacyCredentials: v.optional(v.boolean()),
+    prescriptionRequired: v.optional(v.boolean()),
+    batchNumber: v.optional(v.string()),
+    batchNumberVisible: v.optional(v.boolean()),
+    expiryDate: v.optional(v.string()),
+    expiryDateVisible: v.optional(v.boolean()),
+    sellerRating: v.optional(v.number()),
+    sellerAccountAge: v.optional(v.string()),
+    shippingEvidence: v.optional(v.string()),
+    enrichedAt: v.number(),
+  },
+  handler: async (ctx, { findingId, ...patch }) => {
+    const updates: Record<string, unknown> = { enrichedAt: patch.enrichedAt };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== undefined) {
+        updates[key] = value;
+      }
+    }
+    await ctx.db.patch(findingId, updates);
   },
 });
 

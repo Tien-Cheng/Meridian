@@ -70,7 +70,7 @@ const LooseInspectListingResultSchema = z.object({
   sellerAccountAge: z.string().nullable().optional(),
 });
 
-type InspectListingResult = z.infer<typeof InspectListingResultSchema>;
+export type InspectListingResult = z.infer<typeof InspectListingResultSchema>;
 type InspectListingOutput = InspectListingResult | string;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -715,3 +715,75 @@ export const inspectListing = createTool({
     return `TinyFish completed listing inspection but no structured seller details could be extracted.${rawSummary ? ` Raw summary: ${rawSummary}` : ""}`;
   },
 });
+
+/**
+ * Standalone version of inspectListing that can be called from internalActions
+ * without requiring a ToolCtx. Skips the extractor agent fallback.
+ */
+export async function runInspectListing(input: {
+  listingUrl: string;
+  marketplace: string;
+  region: string;
+}): Promise<InspectListingResult | string> {
+  if (!process.env.TINYFISH_API_KEY) {
+    return "TinyFish API key is missing. Set TINYFISH_API_KEY before running listing inspection.";
+  }
+
+  const goal = buildInspectGoal(input);
+  const proxyCountryCode = getProxyCountryCode(input.listingUrl);
+
+  let response: Response;
+  try {
+    response = await callTinyFish({
+      url: input.listingUrl,
+      goal,
+      browser_profile: "stealth",
+      proxy_config: {
+        enabled: true,
+        ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
+      },
+    });
+  } catch (error) {
+    return `TinyFish request failed: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    return `TinyFish request failed with status ${response.status}: ${
+      errorText.trim() || response.statusText || "no response body"
+    }`;
+  }
+
+  let rawResult: unknown;
+  try {
+    rawResult = await processTinyFishStream(response);
+  } catch (error) {
+    return `TinyFish streaming failed: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+
+  const failure =
+    describeFailure(rawResult) ||
+    (typeof rawResult === "string"
+      ? (() => {
+          for (const candidate of extractJsonCandidates(rawResult)) {
+            try {
+              return describeFailure(JSON.parse(candidate) as unknown);
+            } catch {
+              continue;
+            }
+          }
+          return undefined;
+        })()
+      : undefined);
+  if (failure) {
+    return withCaptchaLimitHint(failure);
+  }
+
+  const normalized = parseStructuredCandidate(rawResult, input);
+  if (normalized) {
+    return normalized;
+  }
+
+  const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+  return `TinyFish completed but no structured details extracted.${rawSummary ? ` Raw: ${rawSummary}` : ""}`;
+}
