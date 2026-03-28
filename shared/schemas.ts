@@ -34,6 +34,13 @@ export const ListingExtractionSchema = z.object({
   listingUrl: z.string(),
   imageUrls: z.array(z.string()).optional(),
   shippingInfo: z.string().optional(),
+  pharmacyBadgeVisible: z.boolean().optional(),
+  prescriptionRequired: z.boolean().optional(),
+  batchNumber: z.string().optional(),
+  expiryDate: z.string().optional(),
+  sellerRating: z.number().optional(),
+  sellerAccountAge: z.string().optional(),
+  productDescriptionSnippet: z.string().optional(),
 });
 
 // GPT case generation structured output
