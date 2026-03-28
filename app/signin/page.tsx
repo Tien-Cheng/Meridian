@@ -10,6 +10,16 @@ export default function SignIn() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+
+  const submitWithFlow = async (
+    form: HTMLFormElement,
+    submitFlow: "signIn" | "signUp"
+  ) => {
+    const formData = new FormData(form);
+    formData.set("flow", submitFlow);
+    await signIn("password", formData);
+  };
+
   return (
     <div className="flex flex-col gap-8 w-full max-w-md mx-auto h-screen justify-center items-center px-4">
       <div className="text-center flex flex-col items-center gap-4">
@@ -24,20 +34,43 @@ export default function SignIn() {
         className="flex flex-col gap-4 w-full bg-zinc-900 p-8 border border-zinc-800"
         onSubmit={(e) => {
           e.preventDefault();
-          setLoading(true);
-          setError(null);
-          const formData = new FormData(e.target as HTMLFormElement);
-          formData.set("flow", flow);
-          void signIn("password", formData)
-            .catch((error) => {
-              setError(error.message);
-              setLoading(false);
-            })
-            .then(() => {
+          const form = e.target as HTMLFormElement;
+          void (async () => {
+            setLoading(true);
+            setError(null);
+
+            try {
+              await submitWithFlow(form, flow);
               router.push("/");
-            });
+              return;
+            } catch (err) {
+              const message =
+                err instanceof Error ? err.message : "Authentication failed";
+
+              const accountExists = /already exists/i.test(message);
+              if (flow === "signUp" && accountExists) {
+                try {
+                  await submitWithFlow(form, "signIn");
+                  setFlow("signIn");
+                  router.push("/");
+                  return;
+                } catch (signInErr) {
+                  setError(
+                    signInErr instanceof Error
+                      ? signInErr.message
+                      : "Sign in failed"
+                  );
+                  return;
+                }
+              }
+
+              setError(message);
+            } finally {
+              setLoading(false);
+            }
+          })();
         }}
-      >
+        >
         <input
           className="bg-zinc-950 text-zinc-100 p-3 border border-zinc-800 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/30 outline-none transition-all placeholder:text-zinc-600 font-mono text-sm"
           type="email"

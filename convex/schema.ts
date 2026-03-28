@@ -107,6 +107,7 @@ export default defineSchema({
     agentIndex: v.number(),
     region: v.string(),
     marketplace: v.string(),
+    tinyfishRunId: v.optional(v.string()),
     status: v.union(
       v.literal("idle"),
       v.literal("launching"),
@@ -120,6 +121,7 @@ export default defineSchema({
     ),
     statusLabel: v.string(),
     screenshotUrl: v.optional(v.string()),
+    streamingUrl: v.optional(v.string()),
     currentUrl: v.optional(v.string()),
     updatedAt: v.number(),
   }).index("by_investigation", ["investigationId"]),

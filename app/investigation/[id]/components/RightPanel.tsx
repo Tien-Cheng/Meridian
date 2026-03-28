@@ -93,6 +93,7 @@ export default function RightPanel({
             <ChatPanel
               investigationContext={investigationContext}
               investigationStatus={investigationStatus}
+              investigationId={investigationId}
               threadId={threadId}
             />
           </div>

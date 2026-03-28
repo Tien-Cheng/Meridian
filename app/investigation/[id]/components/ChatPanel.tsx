@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import { Id } from "@/convex/_generated/dataModel";
 import { useUIMessages, type UIMessage } from "@convex-dev/agent/react";
 import {
   Conversation,
@@ -46,6 +47,7 @@ interface ChatPanelProps {
     sku?: string;
   };
   investigationStatus: string;
+  investigationId: Id<"investigations">;
   threadId: string;
 }
 
@@ -290,6 +292,7 @@ function RecommendationChips({
 export default function ChatPanel({
   investigationContext,
   investigationStatus,
+  investigationId,
   threadId,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
@@ -343,7 +346,7 @@ export default function ChatPanel({
     setInput("");
     setIsSending(true);
     try {
-      await sendMessage({ threadId, prompt });
+      await sendMessage({ threadId, prompt, investigationId });
     } finally {
       setIsSending(false);
     }
