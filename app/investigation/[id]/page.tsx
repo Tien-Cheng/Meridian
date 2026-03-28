@@ -209,6 +209,12 @@ export default function InvestigationPage() {
           >
             <RightPanel
               investigationId={investigationId}
+              investigationContext={{
+                drugName: investigation.drugName,
+                protectedMarket: investigation.protectedMarket,
+                regions: investigation.regions,
+                sku: investigation.sku,
+              }}
               investigationStatus={investigation.status}
               selectedFindingId={selectedFindingId}
               threadId={investigation.threadId}
