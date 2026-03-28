@@ -100,7 +100,8 @@ export default defineSchema({
   })
     .index("by_investigation", ["investigationId"])
     .index("by_thread", ["threadId"])
-    .index("by_risk", ["investigationId", "riskLevel"]),
+    .index("by_risk", ["investigationId", "riskLevel"])
+    .index("by_investigation_and_listing", ["investigationId", "listingUrl"]),
 
   // TinyFish live monitor state
   agentMonitor: defineTable({
@@ -162,7 +163,47 @@ export default defineSchema({
         longitude: v.number(),
       })
     ),
-  }).index("by_investigation", ["investigationId"]),
+  })
+    .index("by_investigation", ["investigationId"])
+    .index("by_investigation_and_cluster", ["investigationId", "clusterId"]),
+
+  evidenceArtifacts: defineTable({
+    investigationId: v.id("investigations"),
+    findingId: v.optional(v.id("findings")),
+    clusterId: v.optional(v.string()),
+    threadId: v.optional(v.string()),
+    agentIndex: v.optional(v.number()),
+    runId: v.optional(v.string()),
+    sourceTool: v.union(
+      v.literal("searchMarketplace"),
+      v.literal("inspectListing"),
+      v.literal("verifyShipping"),
+      v.literal("crawlStorefront"),
+      v.literal("clusterSellers")
+    ),
+    eventType: v.union(
+      v.literal("step"),
+      v.literal("progress"),
+      v.literal("streaming_url"),
+      v.literal("complete"),
+      v.literal("error"),
+      v.literal("result")
+    ),
+    statusLabel: v.string(),
+    currentUrl: v.optional(v.string()),
+    streamingUrl: v.optional(v.string()),
+    screenshotStorageId: v.optional(v.id("_storage")),
+    screenshotSourceUrl: v.optional(v.string()),
+    summaryText: v.optional(v.string()),
+    rawEventJson: v.optional(v.string()),
+    payloadJson: v.optional(v.string()),
+    stepOrder: v.number(),
+    capturedAt: v.number(),
+  })
+    .index("by_investigation_and_captured_at", ["investigationId", "capturedAt"])
+    .index("by_finding_and_captured_at", ["findingId", "capturedAt"])
+    .index("by_cluster_and_captured_at", ["clusterId", "capturedAt"])
+    .index("by_investigation_and_run", ["investigationId", "runId"]),
 
   // Supply chain routes
   supplyRoutes: defineTable({

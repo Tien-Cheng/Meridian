@@ -426,7 +426,7 @@ function InvestigationMap({
             longitude={activeFinding.longitude}
             offset={18}
           >
-            <div className="w-72 px-4 py-3">
+            <div className="w-[min(18rem,calc(100vw-1.5rem))] max-w-full overflow-hidden px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500">
                   Listing Trace
@@ -437,34 +437,36 @@ function InvestigationMap({
                   {activeFinding.riskLevel}
                 </span>
               </div>
-              <p className="mt-2 text-sm text-zinc-100">{activeFinding.title}</p>
+              <p className="mt-2 break-words text-sm text-zinc-100 [overflow-wrap:anywhere]">
+                {activeFinding.title}
+              </p>
               <div className="mt-3 space-y-1.5 font-mono text-[11px] text-zinc-400">
-                <p>
+                <p className="break-words [overflow-wrap:anywhere]">
                   Seller: <span className="text-zinc-200">{activeFinding.sellerName}</span>
                 </p>
-                <p>
+                <p className="break-words [overflow-wrap:anywhere]">
                   Market: <span className="text-zinc-200">{activeFinding.marketplace}</span>
                 </p>
-                <p>
+                <p className="break-words [overflow-wrap:anywhere]">
                   Price:{" "}
                   <span className="text-zinc-200">
                     {activeFinding.currency} {activeFinding.listedPrice.toFixed(2)}
                   </span>
                 </p>
-                <p>
+                <p className="break-words [overflow-wrap:anywhere]">
                   Deviation:{" "}
                   <span className={getRiskTextClass(activeFinding.riskLevel)}>
                     {activeFinding.priceDeviation > 0 ? "+" : ""}
                     {activeFinding.priceDeviation.toFixed(1)}%
                   </span>
                 </p>
-                <p>
+                <p className="break-words [overflow-wrap:anywhere]">
                   Credentials:{" "}
                   <span className="text-zinc-200">
                     {activeFinding.hasPharmacyCredentials ? "Present" : "Missing"}
                   </span>
                 </p>
-                <p>
+                <p className="break-words [overflow-wrap:anywhere]">
                   Prescription gate:{" "}
                   <span className="text-zinc-200">
                     {activeFinding.requiresPrescriptionCheck
@@ -487,7 +489,7 @@ function InvestigationMap({
             longitude={routePopupLocation.longitude}
             offset={14}
           >
-            <div className="w-72 px-4 py-3">
+            <div className="w-[min(18rem,calc(100vw-1.5rem))] max-w-full overflow-hidden px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-zinc-500">
                   Supply Route
@@ -498,10 +500,10 @@ function InvestigationMap({
                   {activeRoute.riskLevel}
                 </span>
               </div>
-              <p className="mt-2 font-mono text-xs text-zinc-100">
+              <p className="mt-2 break-words font-mono text-xs text-zinc-100 [overflow-wrap:anywhere]">
                 {activeRoute.fromRegion} → {activeRoute.toRegion}
               </p>
-              <p className="mt-3 text-sm leading-6 text-zinc-300">
+              <p className="mt-3 break-words text-sm leading-6 text-zinc-300 [overflow-wrap:anywhere]">
                 {activeRoute.concern}
               </p>
               <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-500">
