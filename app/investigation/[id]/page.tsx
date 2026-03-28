@@ -27,53 +27,55 @@ const MAX_BOTTOM_BAR_HEIGHT = 360;
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
+function loadStoredNumber(
+  key: string,
+  fallback: number,
+  min: number,
+  max: number
+) {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  const storedValue = window.localStorage.getItem(key);
+  if (!storedValue) {
+    return fallback;
+  }
+
+  const parsedValue = Number(storedValue);
+  if (Number.isNaN(parsedValue)) {
+    return fallback;
+  }
+
+  return clamp(parsedValue, min, max);
+}
+
 export default function InvestigationPage() {
   const { id } = useParams();
   const investigationId = id as Id<"investigations">;
   const [selectedFindingId, setSelectedFindingId] = useState<
     Id<"findings"> | null
   >(null);
-  const [rightPanelWidth, setRightPanelWidth] = useState(
-    DEFAULT_RIGHT_PANEL_WIDTH
+  const [rightPanelWidth, setRightPanelWidth] = useState(() =>
+    loadStoredNumber(
+      "meridian:rightPanelWidth",
+      DEFAULT_RIGHT_PANEL_WIDTH,
+      MIN_RIGHT_PANEL_WIDTH,
+      MAX_RIGHT_PANEL_WIDTH
+    )
   );
-  const [bottomBarHeight, setBottomBarHeight] = useState(
-    DEFAULT_BOTTOM_BAR_HEIGHT
+  const [bottomBarHeight, setBottomBarHeight] = useState(() =>
+    loadStoredNumber(
+      "meridian:bottomBarHeight",
+      DEFAULT_BOTTOM_BAR_HEIGHT,
+      MIN_BOTTOM_BAR_HEIGHT,
+      MAX_BOTTOM_BAR_HEIGHT
+    )
   );
 
   const investigation = useQuery(api.functions.investigations.get, {
     id: investigationId,
   });
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const storedRightPanelWidth = window.localStorage.getItem(
-      "meridian:rightPanelWidth"
-    );
-    const storedBottomBarHeight = window.localStorage.getItem(
-      "meridian:bottomBarHeight"
-    );
-
-    if (storedRightPanelWidth) {
-      const parsedWidth = Number(storedRightPanelWidth);
-      if (!Number.isNaN(parsedWidth)) {
-        setRightPanelWidth(
-          clamp(parsedWidth, MIN_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH)
-        );
-      }
-    }
-
-    if (storedBottomBarHeight) {
-      const parsedHeight = Number(storedBottomBarHeight);
-      if (!Number.isNaN(parsedHeight)) {
-        setBottomBarHeight(
-          clamp(parsedHeight, MIN_BOTTOM_BAR_HEIGHT, MAX_BOTTOM_BAR_HEIGHT)
-        );
-      }
-    }
-  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") {
