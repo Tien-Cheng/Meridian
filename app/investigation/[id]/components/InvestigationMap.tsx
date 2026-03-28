@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
@@ -14,9 +14,9 @@ import Map, {
   type MapRef,
 } from "react-map-gl/mapbox";
 import {
+  type GeoJSONFeature,
   LngLatBounds,
   type ExpressionSpecification,
-  type MapGeoJSONFeature,
 } from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
@@ -66,7 +66,7 @@ interface InvestigationMapProps {
   selectedFindingId: Id<"findings"> | null;
 }
 
-export default function InvestigationMap({
+function InvestigationMap({
   investigationId,
   onSelectFinding,
   selectedFindingId,
@@ -322,7 +322,7 @@ export default function InvestigationMap({
   };
 
   const handleRouteHover = (event: MapMouseEvent) => {
-    const hoveredFeature = (event.features as MapGeoJSONFeature[] | undefined)?.find(
+    const hoveredFeature = (event.features as GeoJSONFeature[] | undefined)?.find(
       (feature) =>
         typeof feature.layer?.id === "string" &&
         ROUTE_LAYER_IDS.includes(feature.layer.id)
@@ -356,7 +356,7 @@ export default function InvestigationMap({
         }}
         onLoad={() => setMapReady(true)}
         onMouseMove={handleRouteHover}
-          onMouseOut={() => {
+        onMouseOut={() => {
           setHoveredRouteId(null);
           setRoutePopupLocation(null);
         }}
@@ -523,6 +523,8 @@ export default function InvestigationMap({
     </div>
   );
 }
+
+export default memo(InvestigationMap);
 
 function MapFallback({
   label,

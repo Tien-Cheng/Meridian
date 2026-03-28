@@ -160,6 +160,11 @@
   animation: meridian-map-pulse 2s ease-out 1 forwards;
 }
 
+button[aria-label="Resize map and right panel"],
+button[aria-label="Resize lower monitor bar"] {
+  touch-action: none;
+}
+
 @keyframes meridian-map-pulse {
   0% {
     box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55);

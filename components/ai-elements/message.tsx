@@ -54,8 +54,8 @@ export const MessageContent = ({
 }: MessageContentProps) => (
   <div
     className={cn(
-      "flex min-w-0 max-w-full flex-col gap-3 overflow-hidden text-sm",
-      "group-[.is-user]:ml-auto group-[.is-user]:w-fit group-[.is-user]:max-w-[88%] group-[.is-user]:border group-[.is-user]:border-amber-500/30 group-[.is-user]:bg-amber-500/10 group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:font-mono group-[.is-user]:text-zinc-100",
+      "flex min-w-0 max-w-full flex-col gap-3 overflow-hidden text-sm font-sans",
+      "group-[.is-user]:ml-auto group-[.is-user]:w-fit group-[.is-user]:max-w-[88%] group-[.is-user]:border group-[.is-user]:border-amber-500/30 group-[.is-user]:bg-amber-500/10 group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-zinc-100",
       "group-[.is-assistant]:w-full group-[.is-assistant]:text-zinc-100",
       className
     )}
@@ -327,7 +327,7 @@ export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
-        "size-full text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_a]:text-amber-400 [&_a]:underline-offset-2 hover:[&_a]:text-amber-300 hover:[&_a]:underline [&_blockquote]:border-l [&_blockquote]:border-zinc-700 [&_blockquote]:pl-4 [&_code]:rounded-none [&_code]:bg-zinc-900 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-amber-300 [&_h1]:font-mono [&_h1]:text-base [&_h1]:font-bold [&_h1]:tracking-wide [&_h2]:font-mono [&_h2]:text-sm [&_h2]:font-bold [&_h2]:tracking-wide [&_li]:marker:text-amber-500 [&_ol]:pl-5 [&_p]:leading-6 [&_pre]:overflow-x-auto [&_pre]:border [&_pre]:border-zinc-800 [&_pre]:bg-zinc-950 [&_pre]:p-3 [&_pre]:font-mono [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-zinc-800 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-zinc-800 [&_th]:bg-zinc-900 [&_th]:px-2 [&_th]:py-1 [&_ul]:pl-5",
+        "size-full font-sans text-zinc-100 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_a]:text-amber-400 [&_a]:underline-offset-2 hover:[&_a]:text-amber-300 hover:[&_a]:underline [&_blockquote]:border-l [&_blockquote]:border-zinc-700 [&_blockquote]:pl-4 [&_code]:rounded-none [&_code]:bg-zinc-900 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-amber-300 [&_h1]:text-base [&_h1]:font-semibold [&_h2]:text-sm [&_h2]:font-semibold [&_li]:marker:text-amber-500 [&_ol]:pl-5 [&_p]:leading-6 [&_pre]:overflow-x-auto [&_pre]:border [&_pre]:border-zinc-800 [&_pre]:bg-zinc-950 [&_pre]:p-3 [&_pre]:font-mono [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-zinc-800 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-zinc-800 [&_th]:bg-zinc-900 [&_th]:px-2 [&_th]:py-1 [&_ul]:pl-5",
         className
       )}
       plugins={streamdownPlugins}

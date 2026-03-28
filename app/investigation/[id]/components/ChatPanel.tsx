@@ -68,7 +68,7 @@ export default function ChatPanel({ threadId }: ChatPanelProps) {
             <p className="font-mono text-[10px] tracking-[0.22em] text-zinc-500">
               LIVE INVESTIGATION CHAT
             </p>
-            <p className="mt-1 font-mono text-xs text-zinc-300">
+            <p className="mt-1 text-xs text-zinc-300">
               Narrated findings, tool traces, and enforcement-ready context.
             </p>
           </div>
@@ -110,7 +110,7 @@ export default function ChatPanel({ threadId }: ChatPanelProps) {
                       if (part.type === "reasoning") {
                         return (
                           <div
-                            className="border border-zinc-800 bg-zinc-950/70 px-3 py-2 font-mono text-xs text-zinc-400"
+                            className="border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-xs text-zinc-400"
                             key={`${msg.key}-reasoning-${index}`}
                           >
                             {part.text}
@@ -198,7 +198,7 @@ export default function ChatPanel({ threadId }: ChatPanelProps) {
         >
           <PromptInputBody>
             <PromptInputTextarea
-              className="min-h-20 max-h-36 font-mono text-sm text-zinc-100 placeholder:text-zinc-500"
+              className="min-h-20 max-h-36 text-sm text-zinc-100 placeholder:text-zinc-500"
               onChange={(event) => setInput(event.target.value)}
               placeholder="Describe the next investigative step, ask for a seller trace, or request a case summary..."
               value={input}
