@@ -1,4 +1,5 @@
 import { createTool, type ToolCtx } from "@convex-dev/agent";
+import type { FunctionReference } from "convex/server";
 import { z } from "zod/v4";
 import { extractorAgent } from "../agents/extractor";
 import { callTinyFish, processTinyFishStream } from "../lib/tinyfish";
@@ -50,6 +51,15 @@ const BLOCKED_PATTERNS = [
 ];
 
 type SearchMarketplaceOutput = ListingExtraction[] | string;
+type MonitorOptions = {
+  ctx: NonNullable<Parameters<typeof processTinyFishStream>[1]>;
+  meta: {
+    investigationId: string;
+    agentIndex: number;
+    region: string;
+  };
+  updateAgentFn: FunctionReference<"mutation", "public" | "internal">;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -527,8 +537,8 @@ async function normalizeWithExtractor(
   ].join("\n");
 
   const { object } = await extractorAgent.generateObject(
-    ctx,
-    { userId: ctx.userId ?? null },
+    ctx as ToolCtx,
+    { userId: "userId" in ctx ? (ctx.userId ?? null) : null },
     {
       prompt,
       output: "array",
@@ -540,6 +550,103 @@ async function normalizeWithExtractor(
   );
 
   return normalizeListings(object, input);
+}
+
+export async function runMarketplaceSearch(
+  ctx: ToolCtx,
+  input: {
+    marketplaceUrl: string;
+    searchQuery: string;
+    region: string;
+    baselinePrice: number;
+    currency: string;
+  },
+  options?: {
+    monitor?: MonitorOptions;
+  }
+): Promise<SearchMarketplaceOutput> {
+  if (!process.env.TINYFISH_API_KEY) {
+    return "TinyFish API key is missing. Set TINYFISH_API_KEY before running marketplace search.";
+  }
+
+  const proxyCountryCode = getProxyCountryCode(input.marketplaceUrl);
+  const goal = buildSearchGoal(input);
+
+  let response: Response;
+  try {
+    response = await callTinyFish({
+      url: input.marketplaceUrl,
+      goal,
+      browser_profile: "stealth",
+      proxy_config: {
+        enabled: true,
+        ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
+      },
+    });
+  } catch (error) {
+    return `TinyFish request failed before the browser run started: ${
+      error instanceof Error ? error.message : "unknown error"
+    }`;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    return `TinyFish request failed with status ${response.status}: ${
+      errorText.trim() || response.statusText || "no response body"
+    }`;
+  }
+
+  let rawResult: unknown;
+  try {
+    rawResult = await processTinyFishStream(
+      response,
+      options?.monitor?.ctx,
+      options?.monitor?.meta,
+      options?.monitor?.updateAgentFn
+    );
+  } catch (error) {
+    return `TinyFish streaming run failed: ${
+      error instanceof Error ? error.message : "unknown error"
+    }`;
+  }
+
+  const failure =
+    describeFailure(rawResult) ||
+    (typeof rawResult === "string"
+      ? (() => {
+          for (const candidate of extractJsonCandidates(rawResult)) {
+            try {
+              return describeFailure(JSON.parse(candidate) as unknown);
+            } catch {
+              continue;
+            }
+          }
+          return undefined;
+        })()
+      : undefined);
+  if (failure) {
+    return withCaptchaLimitHint(failure);
+  }
+
+  const normalized = parseStructuredCandidates(rawResult, input);
+  if (normalized.length > 0) {
+    return normalized;
+  }
+
+  try {
+    const extracted = await normalizeWithExtractor(ctx, input, rawResult);
+    if (extracted.length > 0) {
+      return extracted;
+    }
+  } catch (error) {
+    return `TinyFish returned unstructured output and extractor normalization failed: ${
+      error instanceof Error ? error.message : "unknown error"
+    }`;
+  }
+
+  const rawSummary = safeSerialize(rawResult).trim().slice(0, 240);
+
+  return `TinyFish completed but no valid listings could be normalized from the response.${rawSummary ? ` Raw summary: ${rawSummary}` : ""}`;
 }
 
 export const searchMarketplace = createTool({
@@ -561,82 +668,6 @@ export const searchMarketplace = createTool({
     currency: z.string().describe("The currency code, e.g. EUR"),
   }),
   execute: async (ctx, input): Promise<SearchMarketplaceOutput> => {
-    if (!process.env.TINYFISH_API_KEY) {
-      return "TinyFish API key is missing. Set TINYFISH_API_KEY before running marketplace search.";
-    }
-
-    const proxyCountryCode = getProxyCountryCode(input.marketplaceUrl);
-    const goal = buildSearchGoal(input);
-
-    let response: Response;
-    try {
-      response = await callTinyFish({
-        url: input.marketplaceUrl,
-        goal,
-        browser_profile: "stealth",
-        proxy_config: {
-          enabled: true,
-          ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
-        },
-      });
-    } catch (error) {
-      return `TinyFish request failed before the browser run started: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return `TinyFish request failed with status ${response.status}: ${
-        errorText.trim() || response.statusText || "no response body"
-      }`;
-    }
-
-    let rawResult: unknown;
-    try {
-      rawResult = await processTinyFishStream(response);
-    } catch (error) {
-      return `TinyFish streaming run failed: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    const failure =
-      describeFailure(rawResult) ||
-      (typeof rawResult === "string"
-        ? (() => {
-            for (const candidate of extractJsonCandidates(rawResult)) {
-              try {
-                return describeFailure(JSON.parse(candidate) as unknown);
-              } catch {
-                continue;
-              }
-            }
-            return undefined;
-          })()
-        : undefined);
-    if (failure) {
-      return withCaptchaLimitHint(failure);
-    }
-
-    const normalized = parseStructuredCandidates(rawResult, input);
-    if (normalized.length > 0) {
-      return normalized;
-    }
-
-    try {
-      const extracted = await normalizeWithExtractor(ctx, input, rawResult);
-      if (extracted.length > 0) {
-        return extracted;
-      }
-    } catch (error) {
-      return `TinyFish returned unstructured output and extractor normalization failed: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    const rawSummary = safeSerialize(rawResult).trim().slice(0, 240);
-
-    return `TinyFish completed but no valid listings could be normalized from the response.${rawSummary ? ` Raw summary: ${rawSummary}` : ""}`;
+    return await runMarketplaceSearch(ctx, input);
   },
 });

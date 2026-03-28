@@ -75,7 +75,7 @@ export async function processTinyFishStream(
       | "error"
       | "crawling_storefront",
     statusLabel: string,
-    extras?: { screenshotUrl?: string; currentUrl?: string }
+    extras?: { screenshotUrl?: string; currentUrl?: string; streamingUrl?: string }
   ) => {
     if (!ctx || !meta || !updateAgentFn) {
       return;
@@ -88,6 +88,7 @@ export async function processTinyFishStream(
       statusLabel,
       screenshotUrl: extras?.screenshotUrl,
       currentUrl: extras?.currentUrl,
+      streamingUrl: extras?.streamingUrl,
     });
   };
 
@@ -139,7 +140,7 @@ export async function processTinyFishStream(
 
     if (eventType === "STREAMING_URL") {
       await updateMonitor("searching", "Live browser active", {
-        currentUrl:
+        streamingUrl:
           typeof data.streaming_url === "string"
             ? data.streaming_url
             : undefined,

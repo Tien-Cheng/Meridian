@@ -4,21 +4,12 @@ import { v } from "convex/values";
 export const listByInvestigation = query({
   args: { investigationId: v.id("investigations") },
   handler: async (ctx, { investigationId }) => {
-    const monitors = await ctx.db
+    return await ctx.db
       .query("agentMonitor")
       .withIndex("by_investigation", (q) =>
         q.eq("investigationId", investigationId)
       )
       .collect();
-
-    return Promise.all(
-      monitors.map(async (m) => ({
-        ...m,
-        screenshotUrl: m.screenshotUrl
-          ? await ctx.storage.getUrl(m.screenshotUrl)
-          : null,
-      }))
-    );
   },
 });
 
@@ -30,7 +21,30 @@ export const initAgent = internalMutation({
     marketplace: v.string(),
   },
   handler: async (ctx, args) => {
-    await ctx.db.insert("agentMonitor", {
+    const existing = await ctx.db
+      .query("agentMonitor")
+      .withIndex("by_investigation_and_agent_index", (q) =>
+        q
+          .eq("investigationId", args.investigationId)
+          .eq("agentIndex", args.agentIndex)
+      )
+      .unique();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        region: args.region,
+        marketplace: args.marketplace,
+        status: "launching",
+        statusLabel: "Initializing...",
+        screenshotUrl: undefined,
+        currentUrl: undefined,
+        streamingUrl: undefined,
+        updatedAt: Date.now(),
+      });
+      return existing._id;
+    }
+
+    return await ctx.db.insert("agentMonitor", {
       ...args,
       status: "launching",
       statusLabel: "Initializing...",
@@ -57,15 +71,17 @@ export const updateAgent = internalMutation({
     statusLabel: v.string(),
     screenshotUrl: v.optional(v.string()),
     currentUrl: v.optional(v.string()),
+    streamingUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("agentMonitor")
-      .withIndex("by_investigation", (q) =>
-        q.eq("investigationId", args.investigationId)
+      .withIndex("by_investigation_and_agent_index", (q) =>
+        q
+          .eq("investigationId", args.investigationId)
+          .eq("agentIndex", args.agentIndex)
       )
-      .filter((q) => q.eq(q.field("agentIndex"), args.agentIndex))
-      .first();
+      .unique();
 
     if (existing) {
       await ctx.db.patch(existing._id, {
@@ -73,6 +89,7 @@ export const updateAgent = internalMutation({
         statusLabel: args.statusLabel,
         screenshotUrl: args.screenshotUrl,
         currentUrl: args.currentUrl,
+        streamingUrl: args.streamingUrl,
         updatedAt: Date.now(),
       });
     }

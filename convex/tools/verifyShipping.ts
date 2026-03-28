@@ -1,4 +1,6 @@
 import { createTool, type ToolCtx } from "@convex-dev/agent";
+import { openai } from "@ai-sdk/openai";
+import { generateObject } from "ai";
 import { z } from "zod/v4";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -50,14 +52,19 @@ const ShippingVerificationResultSchema = z.object({
   evidence: z.string(),
 });
 
+export const ShippingVerificationSchema = z.object({
+  shippingVerified: z.boolean(),
+  shipsInternationally: z.boolean(),
+  shippingOrigin: z.string().optional(),
+  evidence: z.string(),
+  requiresPrescriptionCheck: z.boolean().optional(),
+});
+
 export type ShippingVerificationResult = z.infer<
   typeof ShippingVerificationResultSchema
 >;
-type ShippingVerificationOutput = ShippingVerificationResult | string;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+export type ShippingVerification = z.infer<typeof ShippingVerificationSchema>;
+type ShippingVerificationOutput = ShippingVerification | string;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -72,13 +79,16 @@ function cleanString(value: unknown): string | undefined {
 function parseLooseBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value !== "string") return undefined;
+
   const normalized = value.trim().toLowerCase();
   if (
     ["true", "yes", "visible", "present", "required", "found", "1"].includes(
       normalized
     )
-  )
+  ) {
     return true;
+  }
+
   if (
     [
       "false",
@@ -89,13 +99,16 @@ function parseLooseBoolean(value: unknown): boolean | undefined {
       "not found",
       "0",
     ].includes(normalized)
-  )
+  ) {
     return false;
+  }
+
   return undefined;
 }
 
 function safeSerialize(value: unknown): string {
   if (typeof value === "string") return value;
+
   try {
     return JSON.stringify(value, null, 2) ?? String(value);
   } catch {
@@ -146,21 +159,22 @@ function describeFailure(result: unknown): string | undefined {
   const status = cleanString(result.status)?.toLowerCase();
   const combined = [error, reason, message].filter(Boolean).join(" ");
 
-  if (error)
+  if (error) {
     return `TinyFish reported an error: ${error}`;
-  if (status === "failure")
+  }
+
+  if (status === "failure") {
     return combined
       ? `TinyFish reported failure: ${combined}`
       : "TinyFish reported failure while verifying shipping.";
-  if (combined && looksBlocked(combined))
+  }
+
+  if (combined && looksBlocked(combined)) {
     return `TinyFish appears blocked by anti-bot protection: ${combined}`;
+  }
 
   return undefined;
 }
-
-// ---------------------------------------------------------------------------
-// Goal builder
-// ---------------------------------------------------------------------------
 
 function buildShippingVerificationGoal(input: {
   listingUrl: string;
@@ -178,15 +192,11 @@ function buildShippingVerificationGoal(input: {
     "9. Check whether the checkout flow includes any prescription verification step, pharmacy license check, medical questionnaire, or age verification gate.",
     "10. Note any visible shipping cost or delivery estimate.",
     "11. Do NOT complete any purchase or provide any personal information beyond what is needed to see shipping options.",
-    "12. If an Access Denied/403 page or CAPTCHA appears, return {\"error\":\"blocked\",\"reason\":\"brief explanation\"}.",
+    '12. If an Access Denied/403 page or CAPTCHA appears, return {"error":"blocked","reason":"brief explanation"}.',
     "13. Return only valid JSON with these keys: canShip (boolean - whether the item can ship to the target country), shipsFrom (string or null - origin country), shipsTo (array of country name strings or null), prescriptionCheckInFlow (boolean - whether checkout asks for Rx verification), shippingCost (string or null), loginRequired (boolean - whether sign-in blocked further progress), evidence (string - step-by-step description of what you observed).",
     `14. Target destination country: ${input.protectedMarket}.`,
   ].join("\n");
 }
-
-// ---------------------------------------------------------------------------
-// Result parsing
-// ---------------------------------------------------------------------------
 
 function hasShippingSignal(record: Record<string, unknown>): boolean {
   const keys = [
@@ -222,7 +232,6 @@ function extractShippingCandidate(
   }
 
   if (!isRecord(value)) return undefined;
-
   if (hasShippingSignal(value)) return value;
 
   for (const key of ["result", "shipping", "data", "output", "details"]) {
@@ -286,8 +295,8 @@ function normalizeShippingCandidate(
     parseLooseBoolean(candidate.login_required) ??
     false;
 
-  // If login was required and no explicit canShip decision, mark as cannot ship
-  const finalCanShip = loginRequired && canShipRaw === undefined ? false : canShip;
+  const finalCanShip =
+    loginRequired && canShipRaw === undefined ? false : canShip;
 
   const result: ShippingVerificationResult = {
     canShip: finalCanShip,
@@ -308,14 +317,12 @@ function normalizeShippingCandidate(
 function parseShippingResult(
   rawResult: unknown
 ): ShippingVerificationResult | null {
-  // Try direct object extraction
   const directCandidate = extractShippingCandidate(rawResult);
   if (directCandidate) {
     const normalized = normalizeShippingCandidate(directCandidate);
     if (normalized) return normalized;
   }
 
-  // Try JSON extraction from string
   if (typeof rawResult !== "string") return null;
 
   for (const jsonCandidate of extractJsonCandidates(rawResult)) {
@@ -333,195 +340,36 @@ function parseShippingResult(
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
+function toWorkflowShippingVerification(
+  parsed: ShippingVerificationResult
+): ShippingVerification {
+  return {
+    shippingVerified: true,
+    shipsInternationally: parsed.canShip,
+    shippingOrigin: parsed.shipsFrom ?? undefined,
+    evidence: parsed.evidence,
+    requiresPrescriptionCheck: parsed.prescriptionCheckInFlow,
+  };
+}
 
-export const verifyShipping = createTool({
-  description:
-    "Verify whether a marketplace listing can actually ship to the protected market by testing the cart/checkout flow",
-  inputSchema: z.object({
-    listingUrl: z
-      .string()
-      .describe("The URL of the listing to verify"),
-    protectedMarket: z
-      .string()
-      .describe("The country to check shipping to, e.g. France"),
-    findingId: z
-      .string()
-      .describe("The ID of the finding to update with verification results"),
-  }),
-  execute: async (
-    ctx: ToolCtx,
-    input
-  ): Promise<ShippingVerificationOutput> => {
-    if (!process.env.TINYFISH_API_KEY) {
-      return "TinyFish API key is missing. Set TINYFISH_API_KEY before running shipping verification.";
-    }
-
-    // Look up the finding to get investigationId, region, riskLevel
-    const findingId = input.findingId as Id<"findings">;
-    const finding = await ctx.runQuery(internal.functions.findings.getById, {
-      findingId,
-    });
-    if (!finding) {
-      return `Finding ${input.findingId} not found in database.`;
-    }
-
-    const goal = buildShippingVerificationGoal(input);
-    const destinationProxyCode = COUNTRY_TO_PROXY_CODE.get(
-      input.protectedMarket
-    );
-
-    // Call TinyFish with stealth profile and destination-country proxy
-    let response: Response;
-    try {
-      response = await callTinyFish({
-        url: input.listingUrl,
-        goal,
-        browser_profile: "stealth",
-        proxy_config: {
-          enabled: true,
-          ...(destinationProxyCode
-            ? { country_code: destinationProxyCode }
-            : {}),
-        },
-      });
-    } catch (error) {
-      return `TinyFish request failed before shipping verification started: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return `TinyFish request failed with status ${response.status}: ${
-        errorText.trim() || response.statusText || "no response body"
-      }`;
-    }
-
-    // Process the SSE stream
-    let rawResult: unknown;
-    try {
-      rawResult = await processTinyFishStream(response);
-    } catch (error) {
-      return `TinyFish streaming failed during shipping verification: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    // Check for blocked / error patterns
-    const failure =
-      describeFailure(rawResult) ||
-      (typeof rawResult === "string"
-        ? (() => {
-            for (const candidate of extractJsonCandidates(rawResult)) {
-              try {
-                return describeFailure(JSON.parse(candidate) as unknown);
-              } catch {
-                continue;
-              }
-            }
-            return undefined;
-          })()
-        : undefined);
-    if (failure) {
-      return withCaptchaLimitHint(failure);
-    }
-
-    // Parse and normalize the result
-    const parsed = parseShippingResult(rawResult);
-
-    if (!parsed) {
-      const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
-      // Still mark as verified (attempted) even if unparseable
-      await ctx.runMutation(
-        internal.functions.findings.updateShippingVerification,
-        {
-          findingId,
-          shippingVerified: true,
-          shipsInternationally: false,
-          shippingEvidence: `Shipping verification attempted but no structured result could be parsed. Raw: ${rawSummary}`,
-        }
-      );
-      return `Shipping verification completed but could not parse structured results.${
-        rawSummary ? ` Raw summary: ${rawSummary}` : ""
-      }`;
-    }
-
-    // Update the finding with shipping verification data
-    const shippingOrigin = parsed.shipsFrom ?? undefined;
-    await ctx.runMutation(
-      internal.functions.findings.updateShippingVerification,
-      {
-        findingId,
-        shippingVerified: true,
-        shipsInternationally: parsed.canShip,
-        shippingOrigin,
-        shippingEvidence: parsed.evidence,
-        requiresPrescriptionCheck: parsed.prescriptionCheckInFlow,
-      }
-    );
-
-    // If shipping confirmed, create a verified supply route
-    if (parsed.canShip) {
-      const fromRegion = shippingOrigin ?? finding.region;
-      const toRegion = input.protectedMarket;
-      const fromCoords = getCoordinates(fromRegion);
-      const toCoords = getCoordinates(toRegion);
-      const riskLevel = finding.riskLevel as
-        | "low"
-        | "medium"
-        | "high"
-        | "critical";
-
-      const concern = parsed.prescriptionCheckInFlow
-        ? `Confirmed shipping from ${fromRegion} to ${toRegion}; checkout includes prescription verification`
-        : `Rx drug shipped from ${fromRegion} to ${toRegion} without prescription verification`;
-
-      await ctx.runMutation(internal.functions.routes.createRoute, {
-        investigationId: finding.investigationId,
-        findingId,
-        fromRegion,
-        fromLatitude: fromCoords.latitude,
-        fromLongitude: fromCoords.longitude,
-        toRegion,
-        toLatitude: toCoords.latitude,
-        toLongitude: toCoords.longitude,
-        verified: true,
-        verificationMethod: "cart_shipping_check",
-        riskLevel,
-        concern,
-      });
-    }
-
-    return {
-      canShip: parsed.canShip,
-      shipsFrom: parsed.shipsFrom,
-      shipsTo: parsed.shipsTo,
-      prescriptionCheckInFlow: parsed.prescriptionCheckInFlow,
-      shippingCost: parsed.shippingCost,
-      evidence: parsed.evidence,
-    };
-  },
-});
-
-/**
- * Standalone version of verifyShipping that can be called from internalActions
- * without requiring a ToolCtx. Skips DB updates (caller is responsible).
- */
-export async function runVerifyShipping(input: {
+async function performShippingVerification(input: {
   listingUrl: string;
   protectedMarket: string;
-}): Promise<ShippingVerificationResult | string> {
+}): Promise<{
+  parsed: ShippingVerificationResult | null;
+  rawResult?: unknown;
+  failure?: string;
+}> {
   if (!process.env.TINYFISH_API_KEY) {
-    return "TinyFish API key is missing. Set TINYFISH_API_KEY before running shipping verification.";
+    return {
+      parsed: null,
+      failure:
+        "TinyFish API key is missing. Set TINYFISH_API_KEY before running shipping verification.",
+    };
   }
 
   const goal = buildShippingVerificationGoal(input);
-  const destinationProxyCode = COUNTRY_TO_PROXY_CODE.get(
-    input.protectedMarket
-  );
+  const destinationProxyCode = COUNTRY_TO_PROXY_CODE.get(input.protectedMarket);
 
   let response: Response;
   try {
@@ -531,31 +379,38 @@ export async function runVerifyShipping(input: {
       browser_profile: "stealth",
       proxy_config: {
         enabled: true,
-        ...(destinationProxyCode
-          ? { country_code: destinationProxyCode }
-          : {}),
+        ...(destinationProxyCode ? { country_code: destinationProxyCode } : {}),
       },
     });
   } catch (error) {
-    return `TinyFish request failed: ${
-      error instanceof Error ? error.message : "unknown error"
-    }`;
+    return {
+      parsed: null,
+      failure: `TinyFish request failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    };
   }
 
   if (!response.ok) {
     const errorText = await response.text();
-    return `TinyFish request failed with status ${response.status}: ${
-      errorText.trim() || response.statusText || "no response body"
-    }`;
+    return {
+      parsed: null,
+      failure: `TinyFish request failed with status ${response.status}: ${
+        errorText.trim() || response.statusText || "no response body"
+      }`,
+    };
   }
 
   let rawResult: unknown;
   try {
     rawResult = await processTinyFishStream(response);
   } catch (error) {
-    return `TinyFish streaming failed: ${
-      error instanceof Error ? error.message : "unknown error"
-    }`;
+    return {
+      parsed: null,
+      failure: `TinyFish streaming failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`,
+    };
   }
 
   const failure =
@@ -572,14 +427,150 @@ export async function runVerifyShipping(input: {
           return undefined;
         })()
       : undefined);
+
   if (failure) {
-    return withCaptchaLimitHint(failure);
+    return {
+      parsed: null,
+      rawResult,
+      failure: withCaptchaLimitHint(failure),
+    };
   }
 
-  const parsed = parseShippingResult(rawResult);
-  if (parsed) return parsed;
+  return {
+    parsed: parseShippingResult(rawResult),
+    rawResult,
+  };
+}
 
-  const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+export const verifyShipping = createTool({
+  description:
+    "Verify whether a marketplace listing can actually ship to the protected market by testing the cart/checkout flow",
+  inputSchema: z.object({
+    listingUrl: z.string().describe("The URL of the listing to verify"),
+    protectedMarket: z
+      .string()
+      .describe("The country to check shipping to, e.g. France"),
+    findingId: z
+      .string()
+      .describe("The ID of the finding to update with verification results"),
+  }),
+  execute: async (ctx: ToolCtx, input): Promise<ShippingVerificationOutput> => {
+    const findingId = input.findingId as Id<"findings">;
+    const finding = await ctx.runQuery(internal.functions.findings.getById, {
+      findingId,
+    });
+
+    if (!finding) {
+      return `Finding ${input.findingId} not found in database.`;
+    }
+
+    const verification = await runShippingVerification({
+      listingUrl: input.listingUrl,
+      protectedMarket: input.protectedMarket,
+    });
+
+    await ctx.runMutation(internal.functions.findings.updateShippingVerification, {
+      findingId,
+      shippingVerified: verification.shippingVerified,
+      shipsInternationally: verification.shipsInternationally,
+      shippingOrigin: verification.shippingOrigin,
+      shippingEvidence: verification.evidence,
+      requiresPrescriptionCheck: verification.requiresPrescriptionCheck,
+    });
+
+    if (
+      verification.shippingVerified &&
+      verification.shipsInternationally &&
+      verification.shippingOrigin
+    ) {
+      const fromCoords = getCoordinates(verification.shippingOrigin);
+      const toCoords = getCoordinates(input.protectedMarket);
+      if (fromCoords.latitude !== 0 || fromCoords.longitude !== 0) {
+        await ctx.runMutation(internal.functions.routes.createRoute, {
+          investigationId: finding.investigationId,
+          findingId,
+          fromRegion: verification.shippingOrigin,
+          fromLatitude: fromCoords.latitude,
+          fromLongitude: fromCoords.longitude,
+          toRegion: input.protectedMarket,
+          toLatitude: toCoords.latitude,
+          toLongitude: toCoords.longitude,
+          verified: true,
+          verificationMethod: "cart_shipping_check",
+          riskLevel: finding.riskLevel,
+          concern: verification.requiresPrescriptionCheck
+            ? `Confirmed shipping from ${verification.shippingOrigin} to ${input.protectedMarket}; checkout includes prescription verification`
+            : `Rx drug shipped from ${verification.shippingOrigin} to ${input.protectedMarket} without prescription verification`,
+        });
+      }
+    }
+
+    return verification;
+  },
+});
+
+export async function runShippingVerification(input: {
+  listingUrl: string;
+  protectedMarket: string;
+}): Promise<ShippingVerification> {
+  const { parsed, rawResult, failure } = await performShippingVerification(input);
+
+  if (parsed) {
+    return toWorkflowShippingVerification(parsed);
+  }
+
+  if (rawResult !== undefined) {
+    try {
+      const { object } = await generateObject({
+        model: openai.chat("gpt-5.4-mini"),
+        schema: ShippingVerificationSchema,
+        prompt: [
+          "Normalize the following shipping verification output into JSON.",
+          "Return a JSON object with these exact keys: shippingVerified, shipsInternationally, shippingOrigin, evidence, requiresPrescriptionCheck.",
+          "Set shippingVerified=true only if the raw output contains a direct confirmation or denial from the page/cart/checkout flow.",
+          "If shipping could not be confirmed, set shippingVerified=false and explain why in evidence.",
+          "",
+          safeSerialize(rawResult),
+        ].join("\n"),
+        abortSignal: AbortSignal.timeout(30_000),
+      });
+
+      return ShippingVerificationSchema.parse(object);
+    } catch {
+      const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+      return {
+        shippingVerified: false,
+        shipsInternationally: false,
+        evidence:
+          failure ??
+          `Shipping verification completed but no structured result could be parsed.${rawSummary ? ` Raw: ${rawSummary}` : ""}`,
+      };
+    }
+  }
+
+  return {
+    shippingVerified: false,
+    shipsInternationally: false,
+    evidence: failure ?? "Shipping verification could not be completed.",
+  };
+}
+
+export async function runVerifyShipping(input: {
+  listingUrl: string;
+  protectedMarket: string;
+}): Promise<ShippingVerificationResult | string> {
+  const { parsed, rawResult, failure } = await performShippingVerification(input);
+
+  if (parsed) {
+    return parsed;
+  }
+
+  if (failure) {
+    return failure;
+  }
+
+  const rawSummary =
+    rawResult === undefined ? "" : safeSerialize(rawResult).trim().slice(0, 300);
   return `TinyFish completed but no structured shipping details extracted.${
     rawSummary ? ` Raw: ${rawSummary}` : ""
   }`;

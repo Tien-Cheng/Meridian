@@ -56,7 +56,14 @@ export default function TinyFishMonitor({
 
           {/* Screenshot / content area */}
           <div className="flex-1 bg-zinc-950 flex items-center justify-center">
-            {agent.screenshotUrl ? (
+            {agent.streamingUrl ? (
+              <iframe
+                src={agent.streamingUrl}
+                title={`Agent ${agent.agentIndex} live stream`}
+                className="h-full w-full border-0"
+                sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+              />
+            ) : agent.screenshotUrl ? (
               <img
                 src={agent.screenshotUrl}
                 alt={`Agent ${agent.agentIndex} screenshot`}
