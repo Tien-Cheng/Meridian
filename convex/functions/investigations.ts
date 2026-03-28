@@ -73,7 +73,7 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function normalizeRegion(
-  region: InvestigationRequest["regions"][number]
+  region: InvestigationRequest["regions"][number],
 ): InvestigationRegionInput {
   const name = region.name.trim();
   const marketplace = region.marketplace.trim();
@@ -96,7 +96,7 @@ function normalizeRegion(
     marketplaceUrl = new URL(region.marketplaceUrl).toString();
   } catch {
     throw new Error(
-      `Marketplace URL for region "${name}" must be a valid absolute URL.`
+      `Marketplace URL for region "${name}" must be a valid absolute URL.`,
     );
   }
 
@@ -150,16 +150,12 @@ function normalizeParsedPlan(parsed: InvestigationRequest): {
   };
 }
 
-function planFromInvestigation(
-  investigation: Doc<"investigations">
-):
-  | {
-      drugName: string;
-      drugCategory: string;
-      regulatoryContext: string;
-      regions: InvestigationRegionInput[];
-    }
-  | null {
+function planFromInvestigation(investigation: Doc<"investigations">): {
+  drugName: string;
+  drugCategory: string;
+  regulatoryContext: string;
+  regions: InvestigationRegionInput[];
+} | null {
   const parsed: InvestigationRequest = {
     drugName: investigation.drugName?.trim() ?? "",
     drugCategory: investigation.drugCategory?.trim() ?? "",
@@ -180,9 +176,8 @@ function planFromInvestigation(
         };
       })
       .filter(
-        (
-          region
-        ): region is InvestigationRequest["regions"][number] => region !== null
+        (region): region is InvestigationRequest["regions"][number] =>
+          region !== null,
       ),
   };
 
@@ -237,7 +232,7 @@ function topRiskSignalsFromFinding(finding: Doc<"findings">): string[] {
 }
 
 function networkRiskFromConfidence(
-  confidence: number
+  confidence: number,
 ): "low" | "medium" | "high" | "critical" {
   if (confidence >= 0.85) return "critical";
   if (confidence >= 0.7) return "high";
@@ -259,7 +254,9 @@ function computeJitterOffset(index: number) {
 function summarizeConcern(finding: Doc<"findings">, routeOrigin: string) {
   const concerns: string[] = [];
   if (finding.requiresPrescriptionCheck === false) {
-    concerns.push("Prescription medication sold without visible Rx verification");
+    concerns.push(
+      "Prescription medication sold without visible Rx verification",
+    );
   }
   if (finding.hasPharmacyCredentials === false) {
     concerns.push("No pharmacy credentials visible");
@@ -391,7 +388,7 @@ function parseSellerAccountAgeMonths(value: string): number | null {
 
 function mergeRiskSignals(
   heuristicSignals: FindingRiskSignal[],
-  modelSignals: RiskSignalAssessment["signals"]
+  modelSignals: RiskSignalAssessment["signals"],
 ): FindingRiskSignal[] {
   const merged = new Map<string, FindingRiskSignal>();
 
@@ -428,10 +425,10 @@ function buildHeuristicRiskAssessment(input: {
   const discountMagnitude = Math.max(0, -priceDeviation);
   const priceEvidence = `Listed at ${formatCurrencyAmount(
     listing.price,
-    currency
+    currency,
   )} vs legitimate ${formatCurrencyAmount(
     legitimatePrice,
-    currency
+    currency,
   )} (${formatPercentage(priceDeviation)} deviation).`;
 
   if (legitimatePrice > 0) {
@@ -440,7 +437,7 @@ function buildHeuristicRiskAssessment(input: {
       riskSignals.push({
         signal: "extreme_price_deviation",
         label: `Price is ${formatPercentage(
-          discountMagnitude
+          discountMagnitude,
         )} below legitimate baseline`,
         weight: 0.85,
         evidence: priceEvidence,
@@ -450,7 +447,7 @@ function buildHeuristicRiskAssessment(input: {
       riskSignals.push({
         signal: "major_price_deviation",
         label: `Price is ${formatPercentage(
-          discountMagnitude
+          discountMagnitude,
         )} below legitimate baseline`,
         weight: 0.7,
         evidence: priceEvidence,
@@ -460,7 +457,7 @@ function buildHeuristicRiskAssessment(input: {
       riskSignals.push({
         signal: "moderate_price_deviation",
         label: `Price is ${formatPercentage(
-          discountMagnitude
+          discountMagnitude,
         )} below legitimate baseline`,
         weight: 0.4,
         evidence: priceEvidence,
@@ -520,7 +517,7 @@ function buildHeuristicRiskAssessment(input: {
     });
   }
 
-  if (listing.sellerRating !== undefined) {
+  if (listing.sellerRating != null) {
     if (listing.sellerRating < 3.5) {
       score += 0.1;
       riskSignals.push({
@@ -591,7 +588,7 @@ async function enrichRiskAssessment(
     requiresPrescription: boolean;
   },
   listing: ListingExtraction,
-  heuristic: RiskAssessment
+  heuristic: RiskAssessment,
 ): Promise<RiskAssessment> {
   try {
     const prompt = [
@@ -614,7 +611,7 @@ async function enrichRiskAssessment(
           signals: heuristic.riskSignals,
         },
         null,
-        2
+        2,
       ),
       "",
       "Return a conservative structured assessment. If evidence is limited, stay close to the heuristic.",
@@ -629,7 +626,7 @@ async function enrichRiskAssessment(
       },
       {
         storageOptions: { saveMessages: "none" },
-      }
+      },
     );
 
     const riskScore = clamp01(Math.max(heuristic.riskScore, object.riskScore));
@@ -665,7 +662,7 @@ export const create = mutation({
         baselinePrice: v.optional(v.number()),
         currency: v.string(),
         requiresPrescription: v.optional(v.boolean()),
-      })
+      }),
     ),
     regulatoryContext: v.optional(v.string()),
     protectedMarket: v.optional(v.string()),
@@ -738,7 +735,7 @@ export const updateStatus = internalMutation({
       v.literal("investigating"),
       v.literal("generating_case"),
       v.literal("completed"),
-      v.literal("failed")
+      v.literal("failed"),
     ),
   },
   handler: async (ctx, { id, status }) => {
@@ -770,7 +767,7 @@ export const prepareLaunch = internalMutation({
         baselinePrice: v.optional(v.number()),
         currency: v.string(),
         requiresPrescription: v.boolean(),
-      })
+      }),
     ),
     regulatoryContext: v.string(),
     protectedMarket: v.string(),
@@ -828,7 +825,7 @@ export const applyPlanFromPrompt = internalMutation({
         baselinePrice: v.number(),
         currency: v.string(),
         requiresPrescription: v.boolean(),
-      })
+      }),
     ),
   },
   handler: async (ctx, args) => {
@@ -852,7 +849,7 @@ export const maybeKickoffFromPrompt = internalAction({
   handler: async (ctx, args): Promise<KickoffResult> => {
     const investigation: Doc<"investigations"> | null = await ctx.runQuery(
       internal.functions.investigations.getInvestigationForCase,
-      { id: args.investigationId }
+      { id: args.investigationId },
     );
 
     if (!investigation) {
@@ -885,17 +882,20 @@ export const maybeKickoffFromPrompt = internalAction({
       workflowRegulatoryContext = parsedPlan.regulatoryContext;
       workflowRegions = parsedPlan.regions;
 
-      await ctx.runMutation(internal.functions.investigations.applyPlanFromPrompt, {
-        id: investigation._id,
-        drugName: workflowDrugName,
-        drugCategory: workflowDrugCategory,
-        regulatoryContext: workflowRegulatoryContext,
-        protectedMarket:
-          investigation.protectedMarket?.trim() ||
-          workflowRegions[0]?.name ||
-          workflowRegulatoryContext,
-        regions: workflowRegions,
-      });
+      await ctx.runMutation(
+        internal.functions.investigations.applyPlanFromPrompt,
+        {
+          id: investigation._id,
+          drugName: workflowDrugName,
+          drugCategory: workflowDrugCategory,
+          regulatoryContext: workflowRegulatoryContext,
+          protectedMarket:
+            investigation.protectedMarket?.trim() ||
+            workflowRegions[0]?.name ||
+            workflowRegulatoryContext,
+          regions: workflowRegions,
+        },
+      );
     }
 
     await ctx.runMutation(internal.functions.investigations.updateStatus, {
@@ -930,7 +930,7 @@ export const maybeKickoffFromPrompt = internalAction({
             requiresPrescription: region.requiresPrescription,
           })),
           regulatoryContext: workflowRegulatoryContext,
-        }
+        },
       );
 
       return {
@@ -962,7 +962,7 @@ export const launchWorkflow = internalMutation({
         legitimatePrice: v.number(),
         currency: v.string(),
         requiresPrescription: v.boolean(),
-      })
+      }),
     ),
     regulatoryContext: v.string(),
   },
@@ -971,18 +971,16 @@ export const launchWorkflow = internalMutation({
       "mutation",
       { fn: string; args: typeof args },
       void
-    >("workflows/investigate:investigationWorkflow") as unknown as FunctionReference<
+    >(
+      "workflows/investigate:investigationWorkflow",
+    ) as unknown as FunctionReference<
       "mutation",
       "internal",
       { fn: string; args: typeof args },
       void
     >;
 
-    return await workflowManager.start(
-      ctx,
-      workflowRef,
-      args
-    );
+    return await workflowManager.start(ctx, workflowRef, args);
   },
 });
 
@@ -1093,7 +1091,7 @@ export const listFindingsForInvestigation = internalQuery({
     return await ctx.db
       .query("findings")
       .withIndex("by_investigation", (q) =>
-        q.eq("investigationId", investigationId)
+        q.eq("investigationId", investigationId),
       )
       .collect();
   },
@@ -1105,7 +1103,7 @@ export const listSellerDossiersForInvestigation = internalQuery({
     return await ctx.db
       .query("sellerDossiers")
       .withIndex("by_investigation", (q) =>
-        q.eq("investigationId", investigationId)
+        q.eq("investigationId", investigationId),
       )
       .collect();
   },
@@ -1117,7 +1115,7 @@ export const listSupplyRoutesForInvestigation = internalQuery({
     return await ctx.db
       .query("supplyRoutes")
       .withIndex("by_investigation", (q) =>
-        q.eq("investigationId", investigationId)
+        q.eq("investigationId", investigationId),
       )
       .collect();
   },
@@ -1136,7 +1134,7 @@ export const clearSellerDossiersForInvestigation = internalMutation({
     const dossiers = await ctx.db
       .query("sellerDossiers")
       .withIndex("by_investigation", (q) =>
-        q.eq("investigationId", investigationId)
+        q.eq("investigationId", investigationId),
       )
       .collect();
 
@@ -1166,14 +1164,14 @@ export const createSellerDossier = internalMutation({
       v.literal("low"),
       v.literal("medium"),
       v.literal("high"),
-      v.literal("critical")
+      v.literal("critical"),
     ),
     activeCountries: v.array(
       v.object({
         country: v.string(),
         latitude: v.number(),
         longitude: v.number(),
-      })
+      }),
     ),
   },
   handler: async (ctx, args) => {
@@ -1204,10 +1202,10 @@ export const searchRegion = internalAction({
 
     const existingFindings: Doc<"findings">[] = await ctx.runQuery(
       internal.functions.investigations.listFindingsForInvestigation,
-      { investigationId: args.investigationId }
+      { investigationId: args.investigationId },
     );
     const existingListingUrls = new Set(
-      existingFindings.map((finding) => finding.listingUrl)
+      existingFindings.map((finding) => finding.listingUrl),
     );
 
     let listings: ListingExtraction[];
@@ -1229,9 +1227,89 @@ export const searchRegion = internalAction({
           updateAgentFn: internal.functions.monitor.updateAgent,
         },
       });
+      const coordinates = getCoordinates(args.region);
+      let findingsCreated = 0;
+
+      for (const listing of listings) {
+        const priceDeviation =
+          args.legitimatePrice > 0
+            ? ((listing.price - args.legitimatePrice) / args.legitimatePrice) *
+              100
+            : 0;
+
+        const heuristic = buildHeuristicRiskAssessment({
+          listing,
+          legitimatePrice: args.legitimatePrice,
+          currency: listing.currency || args.currency,
+          requiresPrescription: args.requiresPrescription,
+        });
+        const assessment = await enrichRiskAssessment(
+          ctx,
+          {
+            region: args.region,
+            marketplace: args.marketplace,
+            searchQuery: args.searchQuery,
+            legitimatePrice: args.legitimatePrice,
+            currency: listing.currency || args.currency,
+            requiresPrescription: args.requiresPrescription,
+          },
+          listing,
+          heuristic,
+        );
+
+        await ctx.runMutation(internal.functions.findings.create, {
+          investigationId: args.investigationId,
+          threadId: args.threadId,
+          title: listing.title,
+          marketplace: args.marketplace,
+          region: args.region,
+          sellerName: listing.sellerName,
+          listedPrice: listing.price,
+          currency: listing.currency || args.currency,
+          legitimatePrice: args.legitimatePrice,
+          priceDeviation,
+          listingUrl: listing.listingUrl,
+          imageUrls: listing.imageUrls ?? undefined,
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude,
+          riskScore: assessment.riskScore,
+          riskLevel: assessment.riskLevel,
+          riskSignals: assessment.riskSignals,
+          hasPharmacyCredentials: listing.pharmacyBadgeVisible ?? undefined,
+          requiresPrescriptionCheck: args.requiresPrescription,
+          prescriptionRequired: listing.prescriptionRequired ?? undefined,
+          batchNumberVisible:
+            listing.batchNumber != null
+              ? Boolean(listing.batchNumber)
+              : undefined,
+          expiryDateVisible:
+            listing.expiryDate != null
+              ? Boolean(listing.expiryDate)
+              : undefined,
+          sellerVerificationBadge: listing.pharmacyBadgeVisible ?? undefined,
+        });
+        findingsCreated += 1;
+      }
+
+      await ctx.runMutation(internal.functions.monitor.updateAgent, {
+        investigationId: args.investigationId,
+        agentIndex: args.agentIndex,
+        status: "completed",
+        statusLabel:
+          findingsCreated > 0
+            ? `Stored ${findingsCreated} findings`
+            : "No listings found",
+      });
+
+      return {
+        findingsCreated,
+        region: args.region,
+      };
     } catch (error) {
       const statusLabel = (
-        error instanceof Error ? error.message : "Unknown marketplace search failure"
+        error instanceof Error
+          ? error.message
+          : "Unknown marketplace search failure"
       ).slice(0, 240);
 
       await ctx.runMutation(internal.functions.monitor.updateAgent, {
@@ -1253,7 +1331,8 @@ export const searchRegion = internalAction({
 
       const priceDeviation =
         args.legitimatePrice > 0
-          ? ((listing.price - args.legitimatePrice) / args.legitimatePrice) * 100
+          ? ((listing.price - args.legitimatePrice) / args.legitimatePrice) *
+            100
           : 0;
       const heuristic = buildHeuristicRiskAssessment({
         listing,
@@ -1272,7 +1351,7 @@ export const searchRegion = internalAction({
           requiresPrescription: args.requiresPrescription,
         },
         listing,
-        heuristic
+        heuristic,
       );
       const jitter = computeJitterOffset(index);
 
@@ -1299,9 +1378,13 @@ export const searchRegion = internalAction({
         prescriptionRequired: listing.prescriptionRequired,
         sellerVerificationBadge: listing.pharmacyBadgeVisible,
         batchNumberVisible:
-          listing.batchNumber !== undefined ? Boolean(listing.batchNumber) : undefined,
+          listing.batchNumber !== undefined
+            ? Boolean(listing.batchNumber)
+            : undefined,
         expiryDateVisible:
-          listing.expiryDate !== undefined ? Boolean(listing.expiryDate) : undefined,
+          listing.expiryDate !== undefined
+            ? Boolean(listing.expiryDate)
+            : undefined,
       });
       findingsCreated += 1;
       existingListingUrls.add(listing.listingUrl);
@@ -1343,15 +1426,18 @@ export const deepInvestigate = internalAction({
         internal.functions.investigations.listSupplyRoutesForInvestigation,
         {
           investigationId: args.investigationId,
-        }
+        },
       ),
     ]);
 
     const existingRouteFindingIds = new Set(
-      existingRoutes.map((route) => route.findingId)
+      existingRoutes.map((route) => route.findingId),
     );
     const regionToAgentIndex = new Map(
-      (investigation?.regions ?? []).map((region, index) => [region.name, index])
+      (investigation?.regions ?? []).map((region, index) => [
+        region.name,
+        index,
+      ]),
     );
     const protectedMarket =
       investigation?.protectedMarket?.trim() ||
@@ -1412,27 +1498,30 @@ export const deepInvestigate = internalAction({
           enrichedAt: Date.now(),
         });
 
-        await ctx.runMutation(internal.functions.findings.enrichFromInspection, {
-          findingId: finding._id,
-          title: inspection.title,
-          sellerName: inspection.sellerName,
-          imageUrls:
-            inspection.imageUrls && inspection.imageUrls.length > 0
-              ? inspection.imageUrls
-              : undefined,
-          hasPharmacyCredentials: inspection.pharmacyBadgeVisible,
-          requiresPrescriptionCheck: inspection.prescriptionRequired,
-          prescriptionRequired: inspection.prescriptionRequired,
-          batchNumberVisible:
-            inspection.batchNumber !== undefined
-              ? Boolean(inspection.batchNumber)
-              : undefined,
-          expiryDateVisible:
-            inspection.expiryDate !== undefined
-              ? Boolean(inspection.expiryDate)
-              : undefined,
-          sellerVerificationBadge: inspection.sellerVerificationBadge,
-        });
+        await ctx.runMutation(
+          internal.functions.findings.enrichFromInspection,
+          {
+            findingId: finding._id,
+            title: inspection.title,
+            sellerName: inspection.sellerName,
+            imageUrls:
+              inspection.imageUrls && inspection.imageUrls.length > 0
+                ? inspection.imageUrls
+                : undefined,
+            hasPharmacyCredentials: inspection.pharmacyBadgeVisible,
+            requiresPrescriptionCheck: inspection.prescriptionRequired,
+            prescriptionRequired: inspection.prescriptionRequired,
+            batchNumberVisible:
+              inspection.batchNumber !== undefined
+                ? Boolean(inspection.batchNumber)
+                : undefined,
+            expiryDateVisible:
+              inspection.expiryDate !== undefined
+                ? Boolean(inspection.expiryDate)
+                : undefined,
+            sellerVerificationBadge: inspection.sellerVerificationBadge,
+          },
+        );
 
         let shippingOrigin = inspection.shippingOrigin;
         let shippingVerified = false;
@@ -1470,7 +1559,7 @@ export const deepInvestigate = internalAction({
             shippingOrigin,
             shippingEvidence,
             requiresPrescriptionCheck,
-          }
+          },
         );
 
         if (!existingRouteFindingIds.has(finding._id) && shippingOrigin) {
@@ -1541,7 +1630,7 @@ export const clusterSellersAction = internalAction({
 
     const findings: Doc<"findings">[] = await ctx.runQuery(
       internal.functions.investigations.listFindingsForInvestigation,
-      { investigationId: args.investigationId }
+      { investigationId: args.investigationId },
     );
 
     const serializedFindings = findings.map((finding) => ({
@@ -1571,7 +1660,7 @@ export const clusterSellersAction = internalAction({
 
     await ctx.runMutation(
       internal.functions.investigations.clearSellerDossiersForInvestigation,
-      { investigationId: args.investigationId }
+      { investigationId: args.investigationId },
     );
 
     const canonicalSellerByNormalized = new Map<string, string>();
@@ -1589,9 +1678,9 @@ export const clusterSellersAction = internalAction({
       const mappedSellerNames = uniqueStrings(
         cluster.sellerNames
           .map((name) =>
-            canonicalSellerByNormalized.get(normalizeSellerName(name))
+            canonicalSellerByNormalized.get(normalizeSellerName(name)),
           )
-          .filter((value): value is string => Boolean(value))
+          .filter((value): value is string => Boolean(value)),
       );
 
       if (mappedSellerNames.length === 0) {
@@ -1599,10 +1688,10 @@ export const clusterSellersAction = internalAction({
       }
 
       const mappedSellerSet = new Set(
-        mappedSellerNames.map((name) => normalizeSellerName(name))
+        mappedSellerNames.map((name) => normalizeSellerName(name)),
       );
       const clusterFindings = findings.filter((finding) =>
-        mappedSellerSet.has(normalizeSellerName(finding.sellerName))
+        mappedSellerSet.has(normalizeSellerName(finding.sellerName)),
       );
 
       if (clusterFindings.length === 0) {
@@ -1610,13 +1699,13 @@ export const clusterSellersAction = internalAction({
       }
 
       const marketplaces = uniqueStrings(
-        clusterFindings.map((finding) => finding.marketplace)
+        clusterFindings.map((finding) => finding.marketplace),
       );
       const regions = uniqueStrings(
-        clusterFindings.map((finding) => finding.region)
+        clusterFindings.map((finding) => finding.region),
       );
       const relatedListingIds = uniqueStrings(
-        clusterFindings.map((finding) => finding._id)
+        clusterFindings.map((finding) => finding._id),
       ) as Id<"findings">[];
 
       const activeCountries = regions.map((region) => {
@@ -1628,26 +1717,29 @@ export const clusterSellersAction = internalAction({
         };
       });
 
-      await ctx.runMutation(internal.functions.investigations.createSellerDossier, {
-        investigationId: args.investigationId,
-        clusterId: cluster.clusterId || `cluster-${index + 1}`,
-        sellerNames: mappedSellerNames,
-        marketplaces,
-        regions,
-        relatedListingIds,
-        signals: {
-          nameOverlap: cluster.signals.nameOverlap,
-          imageReuse: cluster.signals.imageReuse,
-          descriptionSimilarity: cluster.signals.descriptionSimilarity,
-          catalogOverlap: cluster.signals.catalogOverlap,
-          sharedShippingOrigin: cluster.signals.sharedShippingOrigin,
+      await ctx.runMutation(
+        internal.functions.investigations.createSellerDossier,
+        {
+          investigationId: args.investigationId,
+          clusterId: cluster.clusterId || `cluster-${index + 1}`,
+          sellerNames: mappedSellerNames,
+          marketplaces,
+          regions,
+          relatedListingIds,
+          signals: {
+            nameOverlap: cluster.signals.nameOverlap,
+            imageReuse: cluster.signals.imageReuse,
+            descriptionSimilarity: cluster.signals.descriptionSimilarity,
+            catalogOverlap: cluster.signals.catalogOverlap,
+            sharedShippingOrigin: cluster.signals.sharedShippingOrigin,
+          },
+          confidenceScore: clamp01(cluster.confidenceScore),
+          networkRiskLevel:
+            cluster.networkRiskLevel ||
+            networkRiskFromConfidence(cluster.confidenceScore),
+          activeCountries,
         },
-        confidenceScore: clamp01(cluster.confidenceScore),
-        networkRiskLevel:
-          cluster.networkRiskLevel ||
-          networkRiskFromConfidence(cluster.confidenceScore),
-        activeCountries,
-      });
+      );
       dossiersCreated += 1;
     }
 
@@ -1671,27 +1763,27 @@ export const generateCase = internalAction({
 
     const findings: Doc<"findings">[] = await ctx.runQuery(
       internal.functions.investigations.listFindingsForInvestigation,
-      { investigationId: args.investigationId }
+      { investigationId: args.investigationId },
     );
     const supplyRoutes: Doc<"supplyRoutes">[] = await ctx.runQuery(
       internal.functions.investigations.listSupplyRoutesForInvestigation,
-      { investigationId: args.investigationId }
+      { investigationId: args.investigationId },
     );
     const dossiers: Doc<"sellerDossiers">[] = await ctx.runQuery(
       internal.functions.investigations.listSellerDossiersForInvestigation,
-      { investigationId: args.investigationId }
+      { investigationId: args.investigationId },
     );
     const investigation: Doc<"investigations"> | null = await ctx.runQuery(
       internal.functions.investigations.getInvestigationForCase,
-      { id: args.investigationId }
+      { id: args.investigationId },
     );
 
     const totalListingsFound = findings.length;
     const suspiciousListings = findings.filter((finding) =>
-      ["medium", "high", "critical"].includes(finding.riskLevel)
+      ["medium", "high", "critical"].includes(finding.riskLevel),
     ).length;
     const highRiskListings = findings.filter((finding) =>
-      ["high", "critical"].includes(finding.riskLevel)
+      ["high", "critical"].includes(finding.riskLevel),
     ).length;
     const sellerNetworksIdentified = dossiers.length;
 
@@ -1749,7 +1841,7 @@ export const generateCase = internalAction({
     }
 
     const findingsById = new Map<string, Doc<"findings">>(
-      findings.map((finding) => [finding._id, finding])
+      findings.map((finding) => [finding._id, finding]),
     );
     const findingSummaries: {
       findingId: Id<"findings">;
@@ -1795,7 +1887,7 @@ export const generateCase = internalAction({
           }));
 
     const dossiersByCluster = new Map<string, Doc<"sellerDossiers">>(
-      dossiers.map((dossier) => [dossier.clusterId, dossier])
+      dossiers.map((dossier) => [dossier.clusterId, dossier]),
     );
     const sellerDossierSummaries: {
       clusterId: string;
@@ -1817,7 +1909,7 @@ export const generateCase = internalAction({
         confidenceScore: clamp01(
           Number.isFinite(summary.confidenceScore)
             ? summary.confidenceScore
-            : dossier.confidenceScore
+            : dossier.confidenceScore,
         ),
         networkRiskLevel: summary.networkRiskLevel || dossier.networkRiskLevel,
         summary: summary.summary,
@@ -1851,7 +1943,8 @@ export const generateCase = internalAction({
     const now = new Date();
     const dateLabel = now.toISOString().slice(0, 10);
     const drugName =
-      investigation?.drugName?.trim() || `Investigation ${args.investigationId}`;
+      investigation?.drugName?.trim() ||
+      `Investigation ${args.investigationId}`;
     const title = `Pharmaceutical Counterfeit Investigation: ${drugName} — ${dateLabel}`;
 
     const caseId: Id<"cases"> = await ctx.runMutation(
@@ -1869,7 +1962,7 @@ export const generateCase = internalAction({
         findingSummaries: normalizedFindingSummaries,
         sellerDossierSummaries: normalizedDossierSummaries,
         recommendedActions,
-      }
+      },
     );
 
     await ctx.runMutation(internal.functions.investigations.updateStatus, {

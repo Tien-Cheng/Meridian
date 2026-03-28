@@ -440,6 +440,15 @@ function normalizeListing(
     currency,
     sellerName,
     listingUrl,
+    imageUrls: null,
+    shippingInfo: null,
+    pharmacyBadgeVisible: null,
+    prescriptionRequired: null,
+    batchNumber: null,
+    expiryDate: null,
+    sellerRating: null,
+    sellerAccountAge: null,
+    productDescriptionSnippet: null,
   };
 
   const imageUrls = pickFirst(candidate, ["imageUrls", "images", "image_urls"], (value) =>
