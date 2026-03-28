@@ -1,5 +1,6 @@
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 import type { FunctionReference } from "convex/server";
+import type { Id } from "../_generated/dataModel";
 import { TINYFISH_API_URL } from "./constants";
 
 interface TinyFishRequest {
@@ -10,14 +11,34 @@ interface TinyFishRequest {
 }
 
 type StreamContext = Pick<GenericActionCtx<GenericDataModel>, "runMutation">;
+type ArtifactContext = Pick<GenericActionCtx<GenericDataModel>, "runMutation" | "storage">;
 
 interface StreamMeta {
-  investigationId: string;
+  investigationId: Id<"investigations">;
   agentIndex: number;
   region: string;
 }
 
 type UpdateAgentFn = FunctionReference<"mutation", "public" | "internal">;
+type CreateArtifactFn = FunctionReference<"mutation", "internal">;
+
+export type TinyFishSourceTool =
+  | "searchMarketplace"
+  | "inspectListing"
+  | "verifyShipping"
+  | "crawlStorefront"
+  | "clusterSellers";
+
+export interface TinyFishPersistenceMeta {
+  investigationId: Id<"investigations">;
+  sourceTool: TinyFishSourceTool;
+  createArtifactFn: CreateArtifactFn;
+  runId: string;
+  findingId?: Id<"findings">;
+  clusterId?: string;
+  threadId?: string;
+  agentIndex?: number;
+}
 
 type TinyFishEvent = {
   type?: string;
@@ -30,6 +51,42 @@ type TinyFishEvent = {
   current_url?: string;
   streaming_url?: string;
 };
+
+function safeSerialize(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+async function persistScreenshot(
+  ctx: ArtifactContext,
+  screenshotSourceUrl?: string
+): Promise<Id<"_storage"> | undefined> {
+  if (!screenshotSourceUrl) {
+    return undefined;
+  }
+
+  try {
+    const response = await fetch(screenshotSourceUrl);
+    if (!response.ok) {
+      return undefined;
+    }
+    const blob = await response.blob();
+    return await ctx.storage.store(blob);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Call the TinyFish SSE endpoint and process the event stream.
@@ -54,7 +111,9 @@ export async function processTinyFishStream(
   response: Response,
   ctx?: StreamContext,
   meta?: StreamMeta,
-  updateAgentFn?: UpdateAgentFn
+  updateAgentFn?: UpdateAgentFn,
+  artifactCtx?: ArtifactContext,
+  artifactMeta?: TinyFishPersistenceMeta
 ): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -64,6 +123,7 @@ export async function processTinyFishStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let result: unknown = null;
+  let stepOrder = 0;
 
   const updateMonitor = async (
     status:
@@ -89,6 +149,56 @@ export async function processTinyFishStream(
       screenshotUrl: extras?.screenshotUrl,
       currentUrl: extras?.currentUrl,
       streamingUrl: extras?.streamingUrl,
+    });
+  };
+
+  const persistArtifact = async ({
+    currentUrl,
+    data,
+    eventType,
+    statusLabel,
+    streamingUrl,
+    summaryText,
+  }: {
+    currentUrl?: string;
+    data: TinyFishEvent;
+    eventType: "step" | "progress" | "streaming_url" | "complete" | "error";
+    statusLabel: string;
+    streamingUrl?: string;
+    summaryText?: string;
+  }) => {
+    if (!artifactCtx || !artifactMeta) {
+      return;
+    }
+
+    stepOrder += 1;
+    const screenshotSourceUrl =
+      typeof data.screenshot_url === "string" ? data.screenshot_url : undefined;
+    const screenshotStorageId = await persistScreenshot(
+      artifactCtx,
+      screenshotSourceUrl
+    );
+
+    await artifactCtx.runMutation(artifactMeta.createArtifactFn, {
+      investigationId: artifactMeta.investigationId,
+      findingId: artifactMeta.findingId,
+      clusterId: artifactMeta.clusterId,
+      threadId: artifactMeta.threadId,
+      agentIndex: artifactMeta.agentIndex,
+      runId: artifactMeta.runId,
+      sourceTool: artifactMeta.sourceTool,
+      eventType,
+      statusLabel,
+      currentUrl,
+      streamingUrl,
+      screenshotStorageId,
+      screenshotSourceUrl,
+      summaryText,
+      rawEventJson: safeSerialize(data),
+      payloadJson:
+        eventType === "complete" ? safeSerialize(data.result) : undefined,
+      stepOrder,
+      capturedAt: Date.now(),
     });
   };
 
@@ -135,6 +245,14 @@ export async function processTinyFishStream(
         currentUrl:
           typeof data.current_url === "string" ? data.current_url : undefined,
       });
+      await persistArtifact({
+        data,
+        eventType: eventType === "STEP" ? "step" : "progress",
+        statusLabel,
+        currentUrl:
+          typeof data.current_url === "string" ? data.current_url : undefined,
+        summaryText: statusLabel,
+      });
       return;
     }
 
@@ -145,12 +263,30 @@ export async function processTinyFishStream(
             ? data.streaming_url
             : undefined,
       });
+      await persistArtifact({
+        data,
+        eventType: "streaming_url",
+        statusLabel: "Live browser active",
+        streamingUrl:
+          typeof data.streaming_url === "string"
+            ? data.streaming_url
+            : undefined,
+        summaryText: "TinyFish provided a live browser stream URL.",
+      });
       return;
     }
 
     if (eventType === "COMPLETE") {
       result = data.result ?? null;
       await updateMonitor("completed", "Done");
+      await persistArtifact({
+        data,
+        eventType: "complete",
+        statusLabel: "Done",
+        currentUrl:
+          typeof data.current_url === "string" ? data.current_url : undefined,
+        summaryText: "TinyFish run completed.",
+      });
       return;
     }
 
@@ -158,6 +294,14 @@ export async function processTinyFishStream(
       const errorMessage =
         typeof data.error === "string" ? data.error : "Error occurred";
       await updateMonitor("error", errorMessage);
+      await persistArtifact({
+        data,
+        eventType: "error",
+        statusLabel: errorMessage,
+        currentUrl:
+          typeof data.current_url === "string" ? data.current_url : undefined,
+        summaryText: errorMessage,
+      });
       throw new Error(errorMessage);
     }
   };

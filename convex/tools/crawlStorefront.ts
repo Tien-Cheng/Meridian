@@ -1,6 +1,17 @@
 import { createTool } from "@convex-dev/agent";
 import { z } from "zod/v4";
-import { callTinyFish, processTinyFishStream } from "../lib/tinyfish";
+import { extractorAgent } from "../agents/extractor";
+import { internal } from "../_generated/api";
+import type { ActionCtx } from "../_generated/server";
+import {
+  callTinyFish,
+  processTinyFishStream,
+  type TinyFishPersistenceMeta,
+} from "../lib/tinyfish";
+import {
+  ListingExtractionSchema,
+  type ListingExtraction,
+} from "../../shared/schemas";
 
 const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
   ["amazon.com", "US"],
@@ -76,25 +87,25 @@ const INVALID_STOREFRONT_VALUES = new Set([
   "na",
 ]);
 
-const CrawlStorefrontListingSchema = z.object({
-  title: z.string(),
-  price: z.number(),
-  currency: z.string(),
-  listingUrl: z.string(),
+const SellerMetadataSchema = z.object({
+  displayName: z.string().nullable(),
+  rating: z.number().nullable(),
+  accountAge: z.string().nullable(),
 });
 
 const CrawlStorefrontResultSchema = z.object({
-  seller: z.object({
-    displayName: z.string().nullable(),
-    rating: z.number().nullable(),
-    accountAge: z.string().nullable(),
-  }),
-  listings: z.array(CrawlStorefrontListingSchema),
+  seller: SellerMetadataSchema,
+  listings: z.array(ListingExtractionSchema),
 });
 
-type CrawlStorefrontListing = z.infer<typeof CrawlStorefrontListingSchema>;
-type CrawlStorefrontResult = z.infer<typeof CrawlStorefrontResultSchema>;
+type SellerMetadata = z.infer<typeof SellerMetadataSchema>;
+export type CrawlStorefrontResult = z.infer<typeof CrawlStorefrontResultSchema>;
 type CrawlStorefrontOutput = CrawlStorefrontResult | string;
+
+type InvestigationToolCtx = ActionCtx & {
+  userId?: string;
+  threadId?: string;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -160,6 +171,41 @@ function parseLooseNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function parseLooseBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    ["true", "yes", "visible", "present", "required", "found", "1"].includes(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    [
+      "false",
+      "no",
+      "not visible",
+      "absent",
+      "not required",
+      "not found",
+      "0",
+    ].includes(normalized)
+  ) {
+    return false;
+  }
+
+  return undefined;
+}
+
 function resolveUrl(candidate: unknown, baseUrl: string): string | undefined {
   if (typeof candidate !== "string") {
     return undefined;
@@ -177,6 +223,43 @@ function resolveUrl(candidate: unknown, baseUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseStringArray(value: unknown, baseUrl: string): string[] | undefined {
+  const toAbsoluteUrl = (candidate: string) => {
+    try {
+      return new URL(candidate, baseUrl).toString();
+    } catch {
+      return undefined;
+    }
+  };
+
+  if (typeof value === "string") {
+    const absoluteUrl = toAbsoluteUrl(value);
+    return absoluteUrl ? [absoluteUrl] : undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const urls = value
+    .map((item) => {
+      if (typeof item === "string") {
+        return toAbsoluteUrl(item);
+      }
+
+      if (isRecord(item)) {
+        return pickFirst(item, ["url", "src", "imageUrl", "href"], (entry) =>
+          typeof entry === "string" ? toAbsoluteUrl(entry) : undefined
+        );
+      }
+
+      return undefined;
+    })
+    .filter((item): item is string => typeof item === "string");
+
+  return urls.length > 0 ? [...new Set(urls)] : undefined;
 }
 
 function safeSerialize(value: unknown): string {
@@ -302,21 +385,23 @@ function normalizeForMatching(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function significantDrugTokens(drugName: string): string[] {
-  return [...new Set(
-    normalizeForMatching(drugName)
-      .split(/\s+/)
-      .filter(
-        (token) =>
-          token.length >= 4 &&
-          !["mg", "mcg", "ml", "and", "with", "plus", "dose"].includes(token)
-      )
-  )];
+function significantDrugTokens(targetName: string): string[] {
+  return [
+    ...new Set(
+      normalizeForMatching(targetName)
+        .split(/\s+/)
+        .filter(
+          (token) =>
+            token.length >= 4 &&
+            !["mg", "mcg", "ml", "and", "with", "plus", "dose"].includes(token)
+        )
+    ),
+  ];
 }
 
 function buildStorefrontGoal(input: {
   sellerStorefrontUrl: string;
-  drugName: string;
+  targetName: string;
 }): string {
   return [
     `1. Open this exact seller storefront URL first: ${input.sellerStorefrontUrl}`,
@@ -326,13 +411,13 @@ function buildStorefrontGoal(input: {
     "5. Confirm this is the seller's storefront/profile/catalog page, then scan the visible product grid or listing feed.",
     "6. Follow at most one obvious 'load more', pagination, or next-page action if it is visible and clearly part of the storefront product catalog.",
     "7. Extract the seller's display name, overall rating if visible, and account age/member since if visible.",
-    `8. Find listings from this seller related to pharmaceutical products, especially "${input.drugName}" and similar medications.`,
-    "9. For each matching listing return: title, price as a number without currency symbols, currency, and listingUrl.",
+    `8. Find listings from this seller related to pharmaceutical products, especially "${input.targetName}" and similar medications.`,
+    "9. For each matching listing return: title, price as a number without currency symbols, currency, sellerName, listingUrl, imageUrls, shippingInfo, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
     "10. Only include listings that are clearly pharmaceutical, medication, pharmacy, prescription, or health-product related. Do not invent values.",
     "11. Use null when seller metadata is not visible.",
     "12. If no matching pharmaceutical listings are visible, return an empty listings array instead of failing.",
     "13. If an Access Denied/403 page appears or any CAPTCHA appears (reCAPTCHA/hCaptcha), return {\"error\":\"blocked\",\"reason\":\"brief explanation\"}.",
-    "14. Return only valid JSON as one object with keys: seller, listings. The seller object must contain displayName, rating, and accountAge. listings must be an array of objects with title, price, currency, listingUrl.",
+    "14. Return only valid JSON as one object with keys: seller, listings. The seller object must contain displayName, rating, and accountAge. listings must be an array.",
   ].join("\n");
 }
 
@@ -498,13 +583,41 @@ function flattenRelevantText(value: unknown, depth = 0): string[] {
   );
 }
 
-type NormalizedListingCandidate = CrawlStorefrontListing & {
+type NormalizedListingCandidate = ListingExtraction & {
   matchText: string;
 };
 
+function normalizeSeller(record: Record<string, unknown>): SellerMetadata {
+  const sellerRecord = pickFirst(
+    record,
+    ["seller", "store", "merchant", "sellerProfile"],
+    (value) => (isRecord(value) ? value : undefined)
+  );
+
+  const source = sellerRecord ?? record;
+
+  return {
+    displayName:
+      pickFirst(
+        source,
+        ["displayName", "sellerName", "storeName", "merchantName", "name"],
+        cleanString
+      ) ?? null,
+    rating:
+      pickFirst(source, ["rating", "sellerRating", "score"], parseLooseNumber) ??
+      null,
+    accountAge:
+      pickFirst(
+        source,
+        ["accountAge", "sellerAccountAge", "memberSince", "sellerSince", "joined"],
+        cleanString
+      ) ?? null,
+  };
+}
+
 function normalizeListingCandidate(
   candidate: unknown,
-  storefrontUrl: string
+  input: { storefrontUrl: string; sellerNameFallback?: string | null }
 ): NormalizedListingCandidate | null {
   if (!isRecord(candidate)) {
     return null;
@@ -521,31 +634,130 @@ function normalizeListingCandidate(
     ["currency", "currencyCode", "currencySymbol"],
     cleanString
   );
+  const sellerName =
+    pickFirst(
+      candidate,
+      ["sellerName", "seller", "merchantName", "storeName"],
+      cleanString
+    ) ??
+    input.sellerNameFallback ??
+    "Unknown seller";
   const listingUrl = resolveUrl(
     pickFirst(candidate, ["listingUrl", "url", "productUrl", "href"], cleanString),
-    storefrontUrl
+    input.storefrontUrl
   );
 
   if (!title || price === undefined || !currency || !listingUrl) {
     return null;
   }
 
-  return {
+  const listing: ListingExtraction = {
     title,
     price,
     currency,
+    sellerName,
     listingUrl,
+  };
+
+  const imageUrls = pickFirst(candidate, ["imageUrls", "images", "image_urls"], (value) =>
+    parseStringArray(value, input.storefrontUrl)
+  );
+  if (imageUrls) {
+    listing.imageUrls = imageUrls;
+  }
+
+  const shippingInfo = pickFirst(
+    candidate,
+    ["shippingInfo", "shipping", "deliveryInfo"],
+    cleanString
+  );
+  if (shippingInfo) {
+    listing.shippingInfo = shippingInfo;
+  }
+
+  const pharmacyBadgeVisible = pickFirst(
+    candidate,
+    ["pharmacyBadgeVisible", "pharmacyBadge", "hasPharmacyBadge"],
+    parseLooseBoolean
+  );
+  if (pharmacyBadgeVisible !== undefined) {
+    listing.pharmacyBadgeVisible = pharmacyBadgeVisible;
+  }
+
+  const prescriptionRequired = pickFirst(
+    candidate,
+    ["prescriptionRequired", "requiresPrescription", "prescriptionMentioned"],
+    parseLooseBoolean
+  );
+  if (prescriptionRequired !== undefined) {
+    listing.prescriptionRequired = prescriptionRequired;
+  }
+
+  const batchNumber = pickFirst(
+    candidate,
+    ["batchNumber", "batchNo", "lotNumber"],
+    cleanString
+  );
+  if (batchNumber) {
+    listing.batchNumber = batchNumber;
+  }
+
+  const expiryDate = pickFirst(
+    candidate,
+    ["expiryDate", "expirationDate", "expiresOn"],
+    cleanString
+  );
+  if (expiryDate) {
+    listing.expiryDate = expiryDate;
+  }
+
+  const sellerRating = pickFirst(
+    candidate,
+    ["sellerRating", "rating"],
+    parseLooseNumber
+  );
+  if (sellerRating !== undefined) {
+    listing.sellerRating = sellerRating;
+  }
+
+  const sellerAccountAge = pickFirst(
+    candidate,
+    ["sellerAccountAge", "accountAge", "memberSince"],
+    cleanString
+  );
+  if (sellerAccountAge) {
+    listing.sellerAccountAge = sellerAccountAge;
+  }
+
+  const productDescriptionSnippet = pickFirst(
+    candidate,
+    ["productDescriptionSnippet", "descriptionSnippet", "description"],
+    cleanString
+  );
+  if (productDescriptionSnippet) {
+    listing.productDescriptionSnippet = productDescriptionSnippet;
+  }
+
+  if (!ListingExtractionSchema.safeParse(listing).success) {
+    return null;
+  }
+
+  return {
+    ...listing,
     matchText: flattenRelevantText(candidate).join(" "),
   };
 }
 
-function isPharmaceuticalMatch(listing: NormalizedListingCandidate, drugName: string): boolean {
+function isPharmaceuticalMatch(
+  listing: NormalizedListingCandidate,
+  targetName: string
+): boolean {
   const titleText = normalizeForMatching(listing.title);
   const matchText = normalizeForMatching(`${listing.title} ${listing.matchText}`);
-  const normalizedDrugName = normalizeForMatching(drugName);
-  const tokens = significantDrugTokens(drugName);
+  const normalizedTargetName = normalizeForMatching(targetName);
+  const tokens = significantDrugTokens(targetName);
 
-  if (normalizedDrugName && matchText.includes(normalizedDrugName)) {
+  if (normalizedTargetName && matchText.includes(normalizedTargetName)) {
     return true;
   }
 
@@ -559,15 +771,24 @@ function isPharmaceuticalMatch(listing: NormalizedListingCandidate, drugName: st
 }
 
 function normalizeListings(
-  candidates: unknown[],
-  input: { storefrontUrl: string; drugName: string }
-): CrawlStorefrontListing[] {
+  rawListings: unknown[],
+  input: {
+    storefrontUrl: string;
+    targetName: string;
+    sellerNameFallback?: string | null;
+  }
+): ListingExtraction[] {
   const seen = new Set<string>();
 
-  return candidates
-    .map((candidate) => normalizeListingCandidate(candidate, input.storefrontUrl))
+  return rawListings
+    .map((candidate) =>
+      normalizeListingCandidate(candidate, {
+        storefrontUrl: input.storefrontUrl,
+        sellerNameFallback: input.sellerNameFallback,
+      })
+    )
     .filter((candidate): candidate is NormalizedListingCandidate => candidate !== null)
-    .filter((candidate) => isPharmaceuticalMatch(candidate, input.drugName))
+    .filter((candidate) => isPharmaceuticalMatch(candidate, input.targetName))
     .filter((candidate) => {
       const key = `${candidate.listingUrl}::${candidate.title.toLowerCase()}`;
       if (seen.has(key)) {
@@ -576,66 +797,52 @@ function normalizeListings(
       seen.add(key);
       return true;
     })
-    .map(({ title, price, currency, listingUrl }) => ({
-      title,
-      price,
-      currency,
-      listingUrl,
-    }))
-    .filter(
-      (listing) => CrawlStorefrontListingSchema.safeParse(listing).success
-    );
-}
-
-function normalizeSeller(record: Record<string, unknown>): CrawlStorefrontResult["seller"] {
-  const sellerRecord = pickFirst(
-    record,
-    ["seller", "store", "merchant", "sellerProfile"],
-    (value) => (isRecord(value) ? value : undefined)
-  );
-
-  const source = sellerRecord ?? record;
-
-  const displayName =
-    pickFirst(
-      source,
-      ["displayName", "sellerName", "storeName", "merchantName", "name"],
-      cleanString
-    ) ?? null;
-  const rating =
-    pickFirst(source, ["rating", "sellerRating", "score"], parseLooseNumber) ??
-    null;
-  const accountAge =
-    pickFirst(
-      source,
-      ["accountAge", "sellerAccountAge", "memberSince", "sellerSince", "joined"],
-      cleanString
-    ) ?? null;
-
-  return {
-    displayName,
-    rating,
-    accountAge,
-  };
+    .map(({ matchText: _matchText, ...listing }) => listing);
 }
 
 function parseStructuredCandidate(
   rawResult: unknown,
-  input: { storefrontUrl: string; drugName: string }
+  input: { storefrontUrl: string; targetName: string }
 ): CrawlStorefrontResult | null {
-  const directCandidate = extractStorefrontCandidate(rawResult);
-  if (directCandidate) {
-    const listings = normalizeListings(
-      extractListingArray(directCandidate) ?? [],
-      input
-    );
-    const result = {
-      seller: normalizeSeller(directCandidate),
-      listings,
-    };
+  const directCandidate =
+    Array.isArray(rawResult) || isRecord(rawResult)
+      ? rawResult
+      : typeof rawResult === "string"
+        ? null
+        : null;
 
-    if (CrawlStorefrontResultSchema.safeParse(result).success) {
-      return result;
+  const attemptParse = (candidateValue: unknown): CrawlStorefrontResult | null => {
+    if (Array.isArray(candidateValue)) {
+      const listings = normalizeListings(candidateValue, {
+        storefrontUrl: input.storefrontUrl,
+        targetName: input.targetName,
+      });
+      const result = {
+        seller: { displayName: null, rating: null, accountAge: null },
+        listings,
+      };
+      return CrawlStorefrontResultSchema.safeParse(result).success ? result : null;
+    }
+
+    const candidate = extractStorefrontCandidate(candidateValue);
+    if (!candidate) {
+      return null;
+    }
+
+    const seller = normalizeSeller(candidate);
+    const listings = normalizeListings(extractListingArray(candidate) ?? [], {
+      storefrontUrl: input.storefrontUrl,
+      targetName: input.targetName,
+      sellerNameFallback: seller.displayName,
+    });
+    const result = { seller, listings };
+    return CrawlStorefrontResultSchema.safeParse(result).success ? result : null;
+  };
+
+  if (directCandidate) {
+    const parsed = attemptParse(directCandidate);
+    if (parsed) {
+      return parsed;
     }
   }
 
@@ -646,18 +853,9 @@ function parseStructuredCandidate(
   for (const jsonCandidate of extractJsonCandidates(rawResult)) {
     try {
       const parsed = JSON.parse(jsonCandidate) as unknown;
-      const candidate = extractStorefrontCandidate(parsed);
-      if (!candidate) {
-        continue;
-      }
-
-      const result = {
-        seller: normalizeSeller(candidate),
-        listings: normalizeListings(extractListingArray(candidate) ?? [], input),
-      };
-
-      if (CrawlStorefrontResultSchema.safeParse(result).success) {
-        return result;
+      const normalized = attemptParse(parsed);
+      if (normalized) {
+        return normalized;
       }
     } catch {
       continue;
@@ -667,94 +865,274 @@ function parseStructuredCandidate(
   return null;
 }
 
+async function normalizeWithExtractor(
+  ctx: InvestigationToolCtx,
+  input: {
+    sellerStorefrontUrl: string;
+    targetName: string;
+  },
+  rawResult: unknown
+): Promise<CrawlStorefrontResult | null> {
+  const prompt = [
+    "Normalize the following storefront crawl output into a structured JSON object.",
+    `Storefront URL: ${input.sellerStorefrontUrl}`,
+    `Target drug or brand: ${input.targetName}`,
+    "Return only listings that clearly exist in the raw content and appear related to the target drug or pharmaceutical category.",
+    "Required top-level keys: seller, listings.",
+    "seller must contain displayName, rating, accountAge.",
+    "Each listing must include title, price, currency, sellerName, listingUrl.",
+    "Optional listing keys: imageUrls, shippingInfo, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
+    "",
+    safeSerialize(rawResult),
+  ].join("\n");
+
+  const { object } = await extractorAgent.generateObject(
+    ctx,
+    { userId: ctx.userId ?? null },
+    {
+      prompt,
+      output: "object",
+      schema: CrawlStorefrontResultSchema,
+    },
+    {
+      storageOptions: { saveMessages: "none" },
+    }
+  );
+
+  const parsed = CrawlStorefrontResultSchema.safeParse(object);
+  return parsed.success ? parsed.data : null;
+}
+
+async function resolveInvestigationContext(
+  ctx?: InvestigationToolCtx,
+  sellerStorefrontUrl?: string | null
+) {
+  const storefrontUrl = normalizeStorefrontUrl(sellerStorefrontUrl);
+  if (!ctx?.threadId || !storefrontUrl) {
+    return { finding: null, investigation: null, storefrontUrl };
+  }
+
+  const investigation = await ctx.runQuery(
+    internal.functions.investigations.getByThread,
+    { threadId: ctx.threadId }
+  );
+  if (!investigation) {
+    return { investigation: null, finding: null, storefrontUrl };
+  }
+
+  const findings = await ctx.runQuery(
+    internal.functions.investigations.listFindingsForInvestigation,
+    { investigationId: investigation._id }
+  );
+  const finding =
+    findings.find(
+      (entry) => normalizeStorefrontUrl(entry.sellerStorefrontUrl) === storefrontUrl
+    ) ?? null;
+
+  return { investigation, finding, storefrontUrl };
+}
+
+function normalizeTargetName(input: {
+  brandName?: string | null;
+  drugName?: string | null;
+}): string | null {
+  const brandName = input.brandName?.trim();
+  if (brandName) {
+    return brandName;
+  }
+
+  const drugName = input.drugName?.trim();
+  if (drugName) {
+    return drugName;
+  }
+
+  return null;
+}
+
+export async function runCrawlStorefront(
+  ctx: InvestigationToolCtx | undefined,
+  input: {
+    sellerStorefrontUrl: string | null | undefined;
+    brandName?: string | null;
+    drugName?: string | null;
+  },
+  persistence?: Omit<TinyFishPersistenceMeta, "createArtifactFn">
+): Promise<CrawlStorefrontOutput> {
+  const storefrontUrl = normalizeStorefrontUrl(input.sellerStorefrontUrl);
+  if (!storefrontUrl) {
+    return "storefront not accessible";
+  }
+
+  const targetName = normalizeTargetName(input);
+  if (!targetName) {
+    return "A target drug or brand name is required for storefront crawl.";
+  }
+
+  if (!process.env.TINYFISH_API_KEY) {
+    return "TinyFish API key is missing. Set TINYFISH_API_KEY before running storefront crawl.";
+  }
+
+  const goal = buildStorefrontGoal({
+    sellerStorefrontUrl: storefrontUrl,
+    targetName,
+  });
+  const proxyCountryCode = getProxyCountryCode(storefrontUrl);
+
+  let response: Response;
+  try {
+    response = await callTinyFish({
+      url: storefrontUrl,
+      goal,
+      browser_profile: "stealth",
+      proxy_config: {
+        enabled: true,
+        ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
+      },
+    });
+  } catch (error) {
+    return `TinyFish request failed before storefront crawl started: ${
+      error instanceof Error ? error.message : "unknown error"
+    }`;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    return `TinyFish request failed with status ${response.status}: ${
+      errorText.trim() || response.statusText || "no response body"
+    }`;
+  }
+
+  let rawResult: unknown;
+  try {
+    rawResult = await processTinyFishStream(
+      response,
+      ctx,
+      persistence
+        ? {
+            investigationId: persistence.investigationId,
+            agentIndex: persistence.agentIndex ?? 0,
+            region: targetName,
+          }
+        : undefined,
+      persistence ? internal.functions.monitor.updateAgent : undefined,
+      persistence ? ctx : undefined,
+      persistence
+        ? {
+            ...persistence,
+            createArtifactFn: internal.functions.evidence.createArtifact,
+          }
+        : undefined
+    );
+  } catch (error) {
+    return `TinyFish streaming run failed while crawling storefront: ${
+      error instanceof Error ? error.message : "unknown error"
+    }`;
+  }
+
+  const failure =
+    describeFailure(rawResult) ||
+    (typeof rawResult === "string"
+      ? (() => {
+          for (const candidate of extractJsonCandidates(rawResult)) {
+            try {
+              return describeFailure(JSON.parse(candidate) as unknown);
+            } catch {
+              continue;
+            }
+          }
+          return undefined;
+        })()
+      : undefined);
+  if (failure) {
+    return withCaptchaLimitHint(failure);
+  }
+
+  const normalized = parseStructuredCandidate(rawResult, {
+    storefrontUrl,
+    targetName,
+  });
+  if (normalized) {
+    return normalized;
+  }
+
+  if (ctx) {
+    try {
+      const extracted = await normalizeWithExtractor(
+        ctx,
+        { sellerStorefrontUrl: storefrontUrl, targetName },
+        rawResult
+      );
+      if (extracted) {
+        return extracted;
+      }
+    } catch {
+      // Fall through to raw summary.
+    }
+  }
+
+  const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+  return `TinyFish completed storefront crawl but no structured storefront data could be extracted.${rawSummary ? ` Raw summary: ${rawSummary}` : ""}`;
+}
+
 export const crawlStorefront = createTool({
   description:
-    "Visit a seller's storefront page and extract pharmaceutical listings plus seller metadata",
+    "Visit a seller storefront and extract pharmaceutical listings plus seller metadata for the target drug or brand",
   inputSchema: z.object({
     sellerStorefrontUrl: z
       .string()
       .nullish()
-      .describe("The URL of the seller's storefront"),
+      .describe("The URL of the seller storefront"),
+    brandName: z
+      .string()
+      .nullish()
+      .describe("The brand or product family to filter storefront listings"),
     drugName: z
       .string()
-      .describe("The primary drug to filter storefront listings for"),
+      .nullish()
+      .describe("The primary drug name to filter storefront listings for"),
   }),
-  execute: async (_ctx, input): Promise<CrawlStorefrontOutput> => {
-    const storefrontUrl = normalizeStorefrontUrl(input.sellerStorefrontUrl);
-    if (!storefrontUrl) {
-      return "storefront not accessible";
-    }
+  execute: async (ctx, input): Promise<CrawlStorefrontOutput> => {
+    const { investigation, finding, storefrontUrl } = await resolveInvestigationContext(
+      ctx,
+      input.sellerStorefrontUrl
+    );
+    const runId = crypto.randomUUID();
+    const result = await runCrawlStorefront(
+      ctx,
+      {
+        sellerStorefrontUrl: storefrontUrl,
+        brandName: input.brandName,
+        drugName: input.drugName,
+      },
+      investigation
+        ? {
+            investigationId: investigation._id,
+            findingId: finding?._id,
+            threadId: ctx.threadId,
+            sourceTool: "crawlStorefront",
+            runId,
+          }
+        : undefined
+    );
 
-    if (!process.env.TINYFISH_API_KEY) {
-      return "TinyFish API key is missing. Set TINYFISH_API_KEY before running storefront crawl.";
-    }
-
-    const goal = buildStorefrontGoal({
-      sellerStorefrontUrl: storefrontUrl,
-      drugName: input.drugName,
-    });
-    const proxyCountryCode = getProxyCountryCode(storefrontUrl);
-
-    let response: Response;
-    try {
-      response = await callTinyFish({
-        url: storefrontUrl,
-        goal,
-        browser_profile: "stealth",
-        proxy_config: {
-          enabled: true,
-          ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
-        },
+    if (investigation && finding && typeof result !== "string") {
+      const targetName = normalizeTargetName(input) ?? "target drug";
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: investigation._id,
+        findingId: finding._id,
+        threadId: ctx.threadId,
+        runId,
+        sourceTool: "crawlStorefront",
+        eventType: "result",
+        statusLabel: `Storefront crawl for ${finding.sellerName}`,
+        currentUrl: storefrontUrl ?? undefined,
+        summaryText: `${result.listings.length} storefront listings captured for ${targetName}.`,
+        payloadJson: JSON.stringify(result),
+        stepOrder: 10_000,
+        capturedAt: Date.now(),
       });
-    } catch (error) {
-      return `TinyFish request failed before storefront crawl started: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      return `TinyFish request failed with status ${response.status}: ${
-        errorText.trim() || response.statusText || "no response body"
-      }`;
-    }
-
-    let rawResult: unknown;
-    try {
-      rawResult = await processTinyFishStream(response);
-    } catch (error) {
-      return `TinyFish streaming run failed while crawling storefront: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`;
-    }
-
-    const failure =
-      describeFailure(rawResult) ||
-      (typeof rawResult === "string"
-        ? (() => {
-            for (const candidate of extractJsonCandidates(rawResult)) {
-              try {
-                return describeFailure(JSON.parse(candidate) as unknown);
-              } catch {
-                continue;
-              }
-            }
-            return undefined;
-          })()
-        : undefined);
-    if (failure) {
-      return withCaptchaLimitHint(failure);
-    }
-
-    const normalized = parseStructuredCandidate(rawResult, {
-      storefrontUrl,
-      drugName: input.drugName,
-    });
-    if (normalized) {
-      return normalized;
-    }
-
-    const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
-    return `TinyFish completed storefront crawl but no structured storefront data could be extracted.${rawSummary ? ` Raw summary: ${rawSummary}` : ""}`;
+    return result;
   },
 });

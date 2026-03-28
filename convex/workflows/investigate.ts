@@ -46,6 +46,7 @@ export const investigationWorkflow = workflow.define({
               .join(" "),
             legitimatePrice: region.legitimatePrice,
             currency: region.currency,
+            requiresPrescription: region.requiresPrescription,
           },
           { retry: true }
         )

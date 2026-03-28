@@ -1,12 +1,20 @@
 import { createTool, type ToolCtx } from "@convex-dev/agent";
 import type { FunctionReference } from "convex/server";
 import { z } from "zod/v4";
+import { internal } from "../_generated/api";
+import type { Id } from "../_generated/dataModel";
+import type { ActionCtx } from "../_generated/server";
 import { extractorAgent } from "../agents/extractor";
-import { callTinyFish, processTinyFishStream } from "../lib/tinyfish";
+import {
+  callTinyFish,
+  processTinyFishStream,
+  type TinyFishPersistenceMeta,
+} from "../lib/tinyfish";
 import {
   ListingExtractionSchema,
   type ListingExtraction,
 } from "../../shared/schemas";
+import { ensureFindingForListing } from "../lib/investigationEvidence";
 
 const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
   ["amazon.com", "US"],
@@ -51,10 +59,14 @@ const BLOCKED_PATTERNS = [
 ];
 
 type SearchMarketplaceOutput = ListingExtraction[] | string;
+type InvestigationToolCtx = ActionCtx & {
+  userId?: string;
+  threadId?: string;
+};
 type MonitorOptions = {
-  ctx: NonNullable<Parameters<typeof processTinyFishStream>[1]>;
+  ctx: InvestigationToolCtx;
   meta: {
-    investigationId: string;
+    investigationId: Id<"investigations">;
     agentIndex: number;
     region: string;
   };
@@ -514,7 +526,7 @@ function parseStructuredCandidates(
 }
 
 async function normalizeWithExtractor(
-  ctx: ToolCtx,
+  ctx: InvestigationToolCtx,
   input: {
     marketplaceUrl: string;
     searchQuery: string;
@@ -537,8 +549,8 @@ async function normalizeWithExtractor(
   ].join("\n");
 
   const { object } = await extractorAgent.generateObject(
-    ctx as ToolCtx,
-    { userId: "userId" in ctx ? (ctx.userId ?? null) : null },
+    ctx,
+    { userId: ctx.userId ?? null },
     {
       prompt,
       output: "array",
@@ -552,6 +564,19 @@ async function normalizeWithExtractor(
   return normalizeListings(object, input);
 }
 
+async function resolveInvestigationContext(ctx?: InvestigationToolCtx) {
+  if (!ctx?.threadId) {
+    return null;
+  }
+
+  const investigation = await ctx.runQuery(
+    internal.functions.investigations.getByThread,
+    { threadId: ctx.threadId }
+  );
+
+  return investigation ?? null;
+}
+
 export async function runMarketplaceSearch(
   ctx: ToolCtx,
   input: {
@@ -560,10 +585,41 @@ export async function runMarketplaceSearch(
     region: string;
     baselinePrice: number;
     currency: string;
+    requiresPrescription?: boolean;
   },
   options?: {
     monitor?: MonitorOptions;
   }
+): Promise<SearchMarketplaceOutput> {
+  const persistence =
+    options?.monitor?.ctx.threadId != null
+      ? {
+          investigationId: options.monitor.meta.investigationId,
+          threadId: options.monitor.ctx.threadId,
+          agentIndex: options.monitor.meta.agentIndex,
+          sourceTool: "searchMarketplace" as const,
+          runId: crypto.randomUUID(),
+        }
+      : undefined;
+
+  return await runSearchMarketplace(
+    ctx as InvestigationToolCtx,
+    input,
+    persistence
+  );
+}
+
+export async function runSearchMarketplace(
+  ctx: InvestigationToolCtx | undefined,
+  input: {
+    marketplaceUrl: string;
+    searchQuery: string;
+    region: string;
+    baselinePrice: number;
+    currency: string;
+    requiresPrescription?: boolean;
+  },
+  persistence?: Omit<TinyFishPersistenceMeta, "createArtifactFn">
 ): Promise<SearchMarketplaceOutput> {
   if (!process.env.TINYFISH_API_KEY) {
     return "TinyFish API key is missing. Set TINYFISH_API_KEY before running marketplace search.";
@@ -600,9 +656,22 @@ export async function runMarketplaceSearch(
   try {
     rawResult = await processTinyFishStream(
       response,
-      options?.monitor?.ctx,
-      options?.monitor?.meta,
-      options?.monitor?.updateAgentFn
+      ctx,
+      persistence
+        ? {
+            investigationId: persistence.investigationId,
+            agentIndex: persistence.agentIndex ?? 0,
+            region: input.region,
+          }
+        : undefined,
+      persistence ? internal.functions.monitor.updateAgent : undefined,
+      persistence ? ctx : undefined,
+      persistence
+        ? {
+            ...persistence,
+            createArtifactFn: internal.functions.evidence.createArtifact,
+          }
+        : undefined
     );
   } catch (error) {
     return `TinyFish streaming run failed: ${
@@ -633,15 +702,17 @@ export async function runMarketplaceSearch(
     return normalized;
   }
 
-  try {
-    const extracted = await normalizeWithExtractor(ctx, input, rawResult);
-    if (extracted.length > 0) {
-      return extracted;
+  if (ctx) {
+    try {
+      const extracted = await normalizeWithExtractor(ctx, input, rawResult);
+      if (extracted.length > 0) {
+        return extracted;
+      }
+    } catch (error) {
+      return `TinyFish returned unstructured output and extractor normalization failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`;
     }
-  } catch (error) {
-    return `TinyFish returned unstructured output and extractor normalization failed: ${
-      error instanceof Error ? error.message : "unknown error"
-    }`;
   }
 
   const rawSummary = safeSerialize(rawResult).trim().slice(0, 240);
@@ -666,8 +737,69 @@ export const searchMarketplace = createTool({
       .number()
       .describe("The official price in this region for comparison"),
     currency: z.string().describe("The currency code, e.g. EUR"),
+    requiresPrescription: z
+      .boolean()
+      .optional()
+      .describe("Whether the region normally requires prescription verification"),
   }),
   execute: async (ctx, input): Promise<SearchMarketplaceOutput> => {
-    return await runMarketplaceSearch(ctx, input);
+    const investigation = await resolveInvestigationContext(ctx);
+    const runId = crypto.randomUUID();
+    const result = await runSearchMarketplace(
+      ctx,
+      input,
+      investigation
+        ? {
+            investigationId: investigation._id,
+            threadId: ctx.threadId,
+            sourceTool: "searchMarketplace",
+            runId,
+          }
+        : undefined
+    );
+
+    if (!investigation || typeof result === "string") {
+      return result;
+    }
+
+    for (const [index, listing] of result.entries()) {
+      const ensured = await ensureFindingForListing(ctx, {
+        investigationId: investigation._id,
+        threadId: investigation.threadId,
+        marketplace:
+          investigation.regions.find((region) => region.name === input.region)?.marketplace ??
+          input.marketplaceUrl,
+        region: input.region,
+        legitimatePrice: input.baselinePrice,
+        requiresPrescription: input.requiresPrescription,
+        listing,
+      });
+
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: investigation._id,
+        findingId: ensured.findingId,
+        threadId: ctx.threadId,
+        runId,
+        sourceTool: "searchMarketplace",
+        eventType: "result",
+        statusLabel: `Search result: ${listing.title}`,
+        currentUrl: listing.listingUrl,
+        summaryText: `${listing.sellerName} at ${listing.currency} ${listing.price.toFixed(2)}`,
+        payloadJson: JSON.stringify({
+          listing,
+          risk: ensured.risk,
+        }),
+        stepOrder: 10_000 + index,
+        capturedAt: Date.now(),
+      });
+
+      await ctx.runMutation(internal.functions.evidence.cloneRunArtifactsToFinding, {
+        investigationId: investigation._id,
+        runId,
+        findingId: ensured.findingId,
+      });
+    }
+
+    return result;
   },
 });

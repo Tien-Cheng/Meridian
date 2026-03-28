@@ -1,8 +1,13 @@
 import { createTool } from "@convex-dev/agent";
-import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
 import { z } from "zod/v4";
-import { callTinyFish, processTinyFishStream } from "../lib/tinyfish";
+import { internal } from "../_generated/api";
+import type { ActionCtx } from "../_generated/server";
+import { extractorAgent } from "../agents/extractor";
+import {
+  callTinyFish,
+  processTinyFishStream,
+  type TinyFishPersistenceMeta,
+} from "../lib/tinyfish";
 
 const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
   ["amazon.com", "US"],
@@ -19,18 +24,6 @@ const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
   ["www.amazon.co.jp", "JP"],
   ["amazon.com.au", "AU"],
   ["www.amazon.com.au", "AU"],
-  ["ebay.com", "US"],
-  ["www.ebay.com", "US"],
-  ["ebay.co.uk", "GB"],
-  ["www.ebay.co.uk", "GB"],
-  ["ebay.ca", "CA"],
-  ["www.ebay.ca", "CA"],
-  ["ebay.de", "DE"],
-  ["www.ebay.de", "DE"],
-  ["ebay.fr", "FR"],
-  ["www.ebay.fr", "FR"],
-  ["ebay.com.au", "AU"],
-  ["www.ebay.com.au", "AU"],
 ]);
 
 const BLOCKED_PATTERNS = [
@@ -45,6 +38,43 @@ const BLOCKED_PATTERNS = [
   /security check/i,
   /blocked/i,
 ];
+
+const InspectListingResultSchema = z.object({
+  listingUrl: z.string(),
+  marketplace: z.string(),
+  region: z.string(),
+  productTitle: z.string().nullable(),
+  currentPrice: z.number().nullable(),
+  currency: z.string().nullable(),
+  sellerName: z.string(),
+  sellerStorefrontUrl: z.string().nullable(),
+  imageUrls: z.array(z.string()),
+  shippingInfo: z.string().nullable(),
+  productDescription: z.string().nullable(),
+  pharmacyBadgeVisible: z.boolean().nullable(),
+  prescriptionRequired: z.boolean().nullable(),
+  batchNumber: z.string().nullable(),
+  expiryDate: z.string().nullable(),
+  sellerRating: z.number().nullable(),
+  sellerAccountAge: z.string().nullable(),
+});
+
+const LooseInspectListingResultSchema = z.object({
+  productTitle: z.string().optional(),
+  currentPrice: z.number().optional(),
+  currency: z.string().optional(),
+  sellerName: z.string().optional(),
+  sellerStorefrontUrl: z.string().nullable().optional(),
+  imageUrls: z.array(z.string()).optional(),
+  shippingInfo: z.string().nullable().optional(),
+  productDescription: z.string().nullable().optional(),
+  pharmacyBadgeVisible: z.boolean().nullable().optional(),
+  prescriptionRequired: z.boolean().nullable().optional(),
+  batchNumber: z.string().nullable().optional(),
+  expiryDate: z.string().nullable().optional(),
+  sellerRating: z.number().nullable().optional(),
+  sellerAccountAge: z.string().nullable().optional(),
+});
 
 export const ListingInspectionSchema = z.object({
   title: z.string().optional(),
@@ -64,8 +94,12 @@ export const ListingInspectionSchema = z.object({
 });
 
 export type ListingInspection = z.infer<typeof ListingInspectionSchema>;
-export type InspectListingResult = ListingInspection;
-type InspectListingOutput = ListingInspection | string;
+export type InspectListingResult = z.infer<typeof InspectListingResultSchema>;
+type InspectListingOutput = InspectListingResult | string;
+type InvestigationToolCtx = ActionCtx & {
+  userId?: string;
+  threadId?: string;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -219,9 +253,9 @@ function parseStringArray(value: unknown, baseUrl: string): string[] {
 function extractAmazonStorefrontUrl(
   candidate: unknown,
   baseUrl: string
-): string | undefined {
+): string | null {
   if (typeof candidate !== "string" || !candidate.trim()) {
-    return undefined;
+    return null;
   }
 
   const absoluteMatch =
@@ -229,16 +263,16 @@ function extractAmazonStorefrontUrl(
       /https?:\/\/[^\s"'<>]+\/(?:storefront|shops)\/[A-Za-z0-9._-]+/i
     )?.[0] ?? null;
   if (absoluteMatch) {
-    return resolveUrl(absoluteMatch, baseUrl);
+    return resolveUrl(absoluteMatch, baseUrl) ?? null;
   }
 
   const relativeMatch =
     candidate.match(/\/(?:storefront|shops)\/[A-Za-z0-9._-]+/i)?.[0] ?? null;
   if (relativeMatch) {
-    return resolveUrl(relativeMatch, baseUrl);
+    return resolveUrl(relativeMatch, baseUrl) ?? null;
   }
 
-  return undefined;
+  return null;
 }
 
 function looksBlocked(text: string): boolean {
@@ -395,106 +429,160 @@ function extractInspectionCandidate(
   return undefined;
 }
 
+function buildInspectGoal(input: {
+  listingUrl: string;
+  marketplace: string;
+  region: string;
+}): string {
+  return [
+    `1. Open this exact product listing URL first (not a search page): ${input.listingUrl}`,
+    "2. Wait for the listing page to fully load before interacting.",
+    "3. If popups appear (cookies, newsletter, region prompts), dismiss them using visible button text and wait 1 second before continuing.",
+    "4. If a security check or 'checking your browser' screen appears, wait once for it to complete automatically.",
+    "5. Scroll down to see seller information and shipping details below the fold.",
+    "6. Interact based on visible text/layout, not hidden selectors.",
+    "7. Extract: full product title, current price (number), currency, full seller name, seller storefront URL if available, all visible product image URLs, shipping/delivery information, and product description text.",
+    "8. Also extract pharmacy-specific signals: whether any pharmacy license or verification badge is shown, whether a prescription is required to purchase, any visible batch number or expiry date, seller rating, and seller account age.",
+    "9. If the seller storefront URL is not visible, return sellerStorefrontUrl as null. Do not fail the whole extraction.",
+    "10. If an Access Denied/403 page appears or any CAPTCHA appears (reCAPTCHA/hCaptcha), return {\"error\":\"blocked\",\"reason\":\"brief explanation\"}.",
+    "11. Return only valid JSON as a single object with keys: productTitle, currentPrice, currency, sellerName, sellerStorefrontUrl, imageUrls, shippingInfo, productDescription, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge.",
+    `12. Marketplace context: ${input.marketplace} in ${input.region}.`,
+  ].join("\n");
+}
+
 function normalizeInspectionCandidate(
-  candidate: Record<string, unknown>,
-  listingUrl: string
-): ListingInspection | null {
-  const imageUrls = parseStringArray(
-    candidate.imageUrls ?? candidate.images ?? candidate.productImages,
-    listingUrl
+  candidate: unknown,
+  input: { listingUrl: string; marketplace: string; region: string }
+): InspectListingResult | null {
+  if (!isRecord(candidate)) {
+    return null;
+  }
+
+  const sellerName = pickFirst(
+    candidate,
+    ["sellerName", "seller", "merchantName", "storeName"],
+    cleanString
   );
 
-  const normalized: ListingInspection = {
-    title: pickFirst(candidate, ["title", "productTitle", "name"], cleanString),
-    sellerName: pickFirst(
+  if (!sellerName) {
+    return null;
+  }
+
+  const productTitle =
+    pickFirst(candidate, ["productTitle", "title", "name"], cleanString) ?? null;
+  const currentPrice =
+    pickFirst(candidate, ["currentPrice", "price", "listedPrice", "amount"], parseLooseNumber) ??
+    null;
+  const currency =
+    pickFirst(candidate, ["currency", "currencyCode", "currencySymbol"], cleanString) ??
+    null;
+
+  const storefrontDirect = pickFirst(
+    candidate,
+    [
+      "sellerStorefrontUrl",
+      "storefrontUrl",
+      "sellerProfileUrl",
+      "sellerUrl",
+      "storeUrl",
+      "merchantUrl",
+    ],
+    (value) => resolveUrl(value, input.listingUrl)
+  );
+
+  const storefrontFromText =
+    extractAmazonStorefrontUrl(safeSerialize(candidate), input.listingUrl) ?? undefined;
+  const sellerStorefrontUrl = storefrontDirect ?? storefrontFromText ?? null;
+
+  const imageUrls =
+    pickFirst(candidate, ["imageUrls", "images", "productImages", "gallery"], (value) =>
+      parseStringArray(value, input.listingUrl)
+    ) ?? [];
+
+  const shippingInfo =
+    pickFirst(
       candidate,
-      ["sellerName", "seller", "storeName", "merchantName"],
+      ["shippingInfo", "shipping", "deliveryInfo", "delivery", "shippingDetails"],
       cleanString
-    ),
-    sellerStorefrontUrl:
-      pickFirst(
-        candidate,
-        ["sellerStorefrontUrl", "storefrontUrl", "sellerPageUrl", "shopUrl"],
-        (value) =>
-          resolveUrl(value, listingUrl) ??
-          extractAmazonStorefrontUrl(value, listingUrl)
-      ) ??
-      extractAmazonStorefrontUrl(
-        cleanString(candidate.evidence) ?? cleanString(candidate.summary) ?? "",
-        listingUrl
-      ),
-    imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
-    shippingInfo: pickFirst(
+    ) ?? null;
+
+  const productDescription =
+    pickFirst(
       candidate,
-      ["shippingInfo", "shipping", "deliveryInfo", "delivery"],
+      ["productDescription", "description", "fullDescription", "aboutThisItem", "details"],
       cleanString
-    ),
-    shippingOrigin: pickFirst(
-      candidate,
-      ["shippingOrigin", "shipsFrom", "origin", "shippingCountry"],
-      cleanString
-    ),
-    pharmacyBadgeVisible: pickFirst(
-      candidate,
-      ["pharmacyBadgeVisible", "pharmacyBadge", "pharmacyLicenseVisible"],
-      parseLooseBoolean
-    ),
-    sellerVerificationBadge: pickFirst(
-      candidate,
-      ["sellerVerificationBadge", "verifiedSeller", "verificationBadgeVisible"],
-      parseLooseBoolean
-    ),
-    prescriptionRequired: pickFirst(
-      candidate,
-      ["prescriptionRequired", "requiresPrescription", "rxRequired"],
-      parseLooseBoolean
-    ),
-    batchNumber: pickFirst(
-      candidate,
-      ["batchNumber", "lotNumber", "batch", "lot"],
-      cleanString
-    ),
-    expiryDate: pickFirst(
-      candidate,
-      ["expiryDate", "expirationDate", "expiresOn"],
-      cleanString
-    ),
-    sellerRating: pickFirst(
-      candidate,
-      ["sellerRating", "rating", "merchantRating"],
-      parseLooseNumber
-    ),
-    sellerAccountAge: pickFirst(
-      candidate,
-      ["sellerAccountAge", "accountAge", "merchantAge"],
-      cleanString
-    ),
-    productDescriptionSnippet: pickFirst(
+    ) ?? null;
+
+  const pharmacyBadgeVisible =
+    pickFirst(
       candidate,
       [
-        "productDescriptionSnippet",
-        "productDescription",
-        "description",
-        "summary",
+        "pharmacyBadgeVisible",
+        "pharmacyBadge",
+        "pharmacyVerified",
+        "hasPharmacyCredentials",
+        "sellerVerificationBadge",
+        "verificationBadge",
       ],
+      parseLooseBoolean
+    ) ?? null;
+
+  const prescriptionRequired =
+    pickFirst(
+      candidate,
+      ["prescriptionRequired", "requiresPrescription", "prescriptionMentioned", "rxRequired"],
+      parseLooseBoolean
+    ) ?? null;
+
+  const batchNumber =
+    pickFirst(candidate, ["batchNumber", "batchNo", "lotNumber", "lotNo"], cleanString) ??
+    null;
+  const expiryDate =
+    pickFirst(
+      candidate,
+      ["expiryDate", "expirationDate", "expiresOn", "bestBefore"],
       cleanString
-    ),
+    ) ?? null;
+
+  const sellerRating =
+    pickFirst(candidate, ["sellerRating", "rating", "sellerScore"], parseLooseNumber) ??
+    null;
+  const sellerAccountAge =
+    pickFirst(candidate, ["sellerAccountAge", "accountAge", "memberSince", "sellerSince"], cleanString) ??
+    null;
+
+  const normalized: InspectListingResult = {
+    listingUrl: input.listingUrl,
+    marketplace: input.marketplace,
+    region: input.region,
+    productTitle,
+    currentPrice,
+    currency,
+    sellerName,
+    sellerStorefrontUrl,
+    imageUrls,
+    shippingInfo,
+    productDescription,
+    pharmacyBadgeVisible,
+    prescriptionRequired,
+    batchNumber,
+    expiryDate,
+    sellerRating,
+    sellerAccountAge,
   };
 
-  const parsed = ListingInspectionSchema.safeParse(normalized);
-  return parsed.success ? parsed.data : null;
+  return InspectListingResultSchema.safeParse(normalized).success
+    ? normalized
+    : null;
 }
 
 function parseStructuredCandidate(
   rawResult: unknown,
-  input: { listingUrl: string }
-): ListingInspection | null {
+  input: { listingUrl: string; marketplace: string; region: string }
+): InspectListingResult | null {
   const directCandidate = extractInspectionCandidate(rawResult);
   if (directCandidate) {
-    const normalized = normalizeInspectionCandidate(
-      directCandidate,
-      input.listingUrl
-    );
+    const normalized = normalizeInspectionCandidate(directCandidate, input);
     if (normalized) {
       return normalized;
     }
@@ -512,10 +600,7 @@ function parseStructuredCandidate(
         continue;
       }
 
-      const normalized = normalizeInspectionCandidate(
-        candidate,
-        input.listingUrl
-      );
+      const normalized = normalizeInspectionCandidate(candidate, input);
       if (normalized) {
         return normalized;
       }
@@ -527,6 +612,39 @@ function parseStructuredCandidate(
   return null;
 }
 
+async function normalizeWithExtractor(
+  ctx: InvestigationToolCtx,
+  input: { listingUrl: string; marketplace: string; region: string },
+  rawResult: unknown
+): Promise<InspectListingResult | null> {
+  const prompt = [
+    "Normalize the following raw marketplace listing output into one JSON object.",
+    "Do not invent values; use null when data is not visible.",
+    `Listing URL: ${input.listingUrl}`,
+    `Marketplace: ${input.marketplace}`,
+    `Region: ${input.region}`,
+    "Required keys: productTitle, currentPrice, currency, sellerName, sellerStorefrontUrl, imageUrls, shippingInfo, productDescription, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge.",
+    "sellerStorefrontUrl must be null if unavailable.",
+    "",
+    safeSerialize(rawResult),
+  ].join("\n");
+
+  const { object } = await extractorAgent.generateObject(
+    ctx,
+    { userId: ctx.userId ?? null },
+    {
+      prompt,
+      output: "object",
+      schema: LooseInspectListingResultSchema,
+    },
+    {
+      storageOptions: { saveMessages: "none" },
+    }
+  );
+
+  return normalizeInspectionCandidate(object, input);
+}
+
 function getProxyCountryCode(listingUrl: string): string | undefined {
   try {
     const hostname = new URL(listingUrl).hostname.toLowerCase();
@@ -536,52 +654,191 @@ function getProxyCountryCode(listingUrl: string): string | undefined {
   }
 }
 
-function buildInspectGoal(input: {
-  listingUrl: string;
-  marketplace: string;
-  region: string;
-}): string {
-  return [
-    `1. Open this exact product listing page: ${input.listingUrl}.`,
-    "2. Wait for the page to fully load and dismiss any visible cookie or newsletter popup.",
-    "3. Scroll enough to inspect the seller section, delivery details, and product description.",
-    "4. Extract these fields if visible: full product title, seller name, seller storefront URL, all product image URLs, shipping/delivery information, shipping origin, any pharmacy or verification badge, whether a prescription is required, any batch number, expiry date, seller rating, seller account age, and a short product description snippet.",
-    "5. Use null or omit fields that are not visible. Do not invent values.",
-    "6. Return only valid JSON with no markdown.",
-    `7. Marketplace context: ${input.marketplace} in ${input.region}.`,
-  ].join("\n");
+async function resolveInvestigationContext(
+  ctx?: InvestigationToolCtx,
+  listingUrl?: string
+) {
+  if (!ctx?.threadId) {
+    return { finding: null, investigation: null };
+  }
+
+  const investigation = await ctx.runQuery(
+    internal.functions.investigations.getByThread,
+    { threadId: ctx.threadId }
+  );
+  if (!investigation || !listingUrl) {
+    return { investigation, finding: null };
+  }
+
+  const finding = await ctx.runQuery(
+    internal.functions.findings.getByInvestigationAndListingUrl,
+    {
+      investigationId: investigation._id,
+      listingUrl,
+    }
+  );
+
+  return { investigation, finding };
 }
 
-export async function runListingInspection(input: {
-  listingUrl: string;
-  marketplace: string;
-  region: string;
-}): Promise<ListingInspection> {
+function toListingInspection(
+  result: InspectListingResult
+): ListingInspection {
+  return {
+    title: result.productTitle ?? undefined,
+    sellerName: result.sellerName || undefined,
+    sellerStorefrontUrl: result.sellerStorefrontUrl ?? undefined,
+    imageUrls: result.imageUrls.length > 0 ? result.imageUrls : undefined,
+    shippingInfo: result.shippingInfo ?? undefined,
+    pharmacyBadgeVisible: result.pharmacyBadgeVisible ?? undefined,
+    prescriptionRequired: result.prescriptionRequired ?? undefined,
+    batchNumber: result.batchNumber ?? undefined,
+    expiryDate: result.expiryDate ?? undefined,
+    sellerRating: result.sellerRating ?? undefined,
+    sellerAccountAge: result.sellerAccountAge ?? undefined,
+    productDescriptionSnippet: result.productDescription ?? undefined,
+  };
+}
+
+export const inspectListing = createTool({
+  description:
+    "Open a specific listing page and extract detailed seller info, images, and shipping details",
+  inputSchema: z.object({
+    listingUrl: z.string().describe("The URL of the listing to inspect"),
+    marketplace: z
+      .string()
+      .describe("The marketplace name, e.g. Amazon.de"),
+    region: z.string().describe("The marketplace region, e.g. Germany"),
+  }),
+  execute: async (ctx, input): Promise<InspectListingOutput> => {
+    const { investigation, finding } = await resolveInvestigationContext(
+      ctx,
+      input.listingUrl
+    );
+    const runId = crypto.randomUUID();
+    const result = await runInspectListing(
+      ctx,
+      input,
+      investigation
+        ? {
+            investigationId: investigation._id,
+            findingId: finding?._id,
+            threadId: ctx.threadId,
+            sourceTool: "inspectListing",
+            runId,
+          }
+        : undefined
+    );
+
+    if (
+      investigation &&
+      finding &&
+      typeof result !== "string"
+    ) {
+      await ctx.runMutation(internal.functions.findings.enrichFinding, {
+        findingId: finding._id,
+        sellerStorefrontUrl: result.sellerStorefrontUrl ?? undefined,
+        imageUrls: result.imageUrls.length > 0 ? result.imageUrls : undefined,
+        productDescription: result.productDescription ?? undefined,
+        hasPharmacyCredentials: result.pharmacyBadgeVisible ?? undefined,
+        prescriptionRequired: result.prescriptionRequired ?? undefined,
+        batchNumber: result.batchNumber ?? undefined,
+        batchNumberVisible: result.batchNumber != null ? true : undefined,
+        expiryDate: result.expiryDate ?? undefined,
+        expiryDateVisible: result.expiryDate != null ? true : undefined,
+        sellerRating: result.sellerRating ?? undefined,
+        sellerAccountAge: result.sellerAccountAge ?? undefined,
+        shippingEvidence: result.shippingInfo ?? undefined,
+        enrichedAt: Date.now(),
+      });
+      await ctx.runMutation(internal.functions.evidence.createArtifact, {
+        investigationId: investigation._id,
+        findingId: finding._id,
+        threadId: ctx.threadId,
+        runId,
+        sourceTool: "inspectListing",
+        eventType: "result",
+        statusLabel: `Inspection result for ${result.sellerName}`,
+        currentUrl: input.listingUrl,
+        summaryText:
+          result.productDescription ?? result.shippingInfo ?? result.productTitle ?? "Listing inspection completed.",
+        payloadJson: JSON.stringify(result),
+        stepOrder: 10_000,
+        capturedAt: Date.now(),
+      });
+    }
+
+    return result;
+  },
+});
+
+/**
+ * Standalone version of inspectListing that can be called from internalActions
+ * without requiring a ToolCtx. Skips the extractor agent fallback.
+ */
+export async function runInspectListing(
+  ctx: InvestigationToolCtx | undefined,
+  input: {
+    listingUrl: string;
+    marketplace: string;
+    region: string;
+  },
+  persistence?: Omit<TinyFishPersistenceMeta, "createArtifactFn">
+): Promise<InspectListingResult | string> {
   if (!process.env.TINYFISH_API_KEY) {
-    throw new Error("TinyFish API key is missing.");
+    return "TinyFish API key is missing. Set TINYFISH_API_KEY before running listing inspection.";
   }
 
+  const goal = buildInspectGoal(input);
   const proxyCountryCode = getProxyCountryCode(input.listingUrl);
-  const response = await callTinyFish({
-    url: input.listingUrl,
-    goal: buildInspectGoal(input),
-    browser_profile: "stealth",
-    proxy_config: {
-      enabled: true,
-      ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
-    },
-  });
+
+  let response: Response;
+  try {
+    response = await callTinyFish({
+      url: input.listingUrl,
+      goal,
+      browser_profile: "stealth",
+      proxy_config: {
+        enabled: true,
+        ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
+      },
+    });
+  } catch (error) {
+    return `TinyFish request failed: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(
-      `TinyFish inspect request failed with status ${response.status}: ${
-        message.trim() || response.statusText || "no response body"
-      }`
-    );
+    const errorText = await response.text();
+    return `TinyFish request failed with status ${response.status}: ${
+      errorText.trim() || response.statusText || "no response body"
+    }`;
   }
 
-  const rawResult = await processTinyFishStream(response);
+  let rawResult: unknown;
+  try {
+    rawResult = await processTinyFishStream(
+      response,
+      ctx,
+      persistence
+        ? {
+            investigationId: persistence.investigationId,
+            agentIndex: persistence.agentIndex ?? 0,
+            region: input.region,
+          }
+        : undefined,
+      persistence ? internal.functions.monitor.updateAgent : undefined,
+      persistence ? ctx : undefined,
+      persistence
+        ? {
+            ...persistence,
+            createArtifactFn: internal.functions.evidence.createArtifact,
+          }
+        : undefined
+    );
+  } catch (error) {
+    return `TinyFish streaming failed: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+
   const failure =
     describeFailure(rawResult) ||
     (typeof rawResult === "string"
@@ -596,9 +853,8 @@ export async function runListingInspection(input: {
           return undefined;
         })()
       : undefined);
-
   if (failure) {
-    throw new Error(withCaptchaLimitHint(failure));
+    return withCaptchaLimitHint(failure);
   }
 
   const normalized = parseStructuredCandidate(rawResult, input);
@@ -606,46 +862,33 @@ export async function runListingInspection(input: {
     return normalized;
   }
 
-  const prompt = [
-    "Normalize the following product listing inspection output into JSON.",
-    "Return a JSON object with these optional keys only:",
-    "title, sellerName, sellerStorefrontUrl, imageUrls, shippingInfo, shippingOrigin, pharmacyBadgeVisible, sellerVerificationBadge, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
-    "Use arrays only for imageUrls. Omit fields you cannot confirm.",
-    "",
-    safeSerialize(rawResult),
-  ].join("\n");
+  if (!ctx) {
+    const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+    return `TinyFish completed but no structured details extracted.${rawSummary ? ` Raw: ${rawSummary}` : ""}`;
+  }
 
-  const { object } = await generateObject({
-    model: openai.chat("gpt-5.4-mini"),
-    schema: ListingInspectionSchema,
-    prompt,
-    abortSignal: AbortSignal.timeout(30_000),
-  });
+  const rawSummary = safeSerialize(rawResult).trim().slice(0, 300);
+  try {
+    const extracted = await normalizeWithExtractor(ctx, input, rawResult);
+    if (extracted) {
+      return extracted;
+    }
+  } catch {
+    // Fall through to the raw summary message below.
+  }
 
-  return ListingInspectionSchema.parse(object);
+  return `TinyFish completed but no structured details extracted.${rawSummary ? ` Raw: ${rawSummary}` : ""}`;
 }
 
-export const inspectListing = createTool({
-  description:
-    "Open a specific listing page and extract detailed seller info, images, and shipping details",
-  inputSchema: z.object({
-    listingUrl: z.string().describe("The URL of the listing to inspect"),
-    marketplace: z.string().describe("The marketplace name, e.g. Amazon.de"),
-    region: z.string().describe("The marketplace region, e.g. Germany"),
-  }),
-  execute: async (_ctx, input): Promise<InspectListingOutput> => {
-    return await runInspectListing(input);
-  },
-});
-
-export async function runInspectListing(input: {
+export async function runListingInspection(input: {
   listingUrl: string;
   marketplace: string;
   region: string;
-}): Promise<InspectListingOutput> {
-  try {
-    return await runListingInspection(input);
-  } catch (error) {
-    return error instanceof Error ? error.message : "Listing inspection failed";
+}): Promise<ListingInspection> {
+  const result = await runInspectListing(undefined, input);
+  if (typeof result === "string") {
+    throw new Error(result);
   }
+
+  return ListingInspectionSchema.parse(toListingInspection(result));
 }
