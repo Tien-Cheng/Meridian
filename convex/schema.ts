@@ -9,18 +9,19 @@ export default defineSchema({
   investigations: defineTable({
     userId: v.optional(v.string()),
     threadId: v.string(),
-    brand: v.string(),
-    sku: v.string(),
+    drugName: v.string(),
+    drugCategory: v.string(),
     regions: v.array(
       v.object({
         name: v.string(),
         marketplace: v.string(),
         marketplaceUrl: v.string(),
-        baselinePrice: v.number(),
+        legitimatePrice: v.number(),
         currency: v.string(),
+        requiresPrescription: v.boolean(),
       })
     ),
-    protectedMarket: v.string(),
+    regulatoryContext: v.string(),
     status: v.union(
       v.literal("pending"),
       v.literal("searching"),
@@ -44,23 +45,48 @@ export default defineSchema({
     sellerName: v.string(),
     listedPrice: v.number(),
     currency: v.string(),
-    baselinePrice: v.number(),
+    legitimatePrice: v.number(),
     priceDeviation: v.number(),
     listingUrl: v.string(),
     imageUrls: v.optional(v.array(v.string())),
     latitude: v.number(),
     longitude: v.number(),
-    isSuspicious: v.boolean(),
-    suspicionReasons: v.array(v.string()),
+    // Risk assessment
+    riskScore: v.number(),
+    riskLevel: v.union(
+      v.literal("low"),
+      v.literal("medium"),
+      v.literal("high"),
+      v.literal("critical")
+    ),
+    riskSignals: v.array(
+      v.object({
+        signal: v.string(),
+        label: v.string(),
+        weight: v.number(),
+        evidence: v.string(),
+      })
+    ),
+    // Pharmaceutical-specific fields
+    hasPharmacyCredentials: v.optional(v.boolean()),
+    requiresPrescriptionCheck: v.optional(v.boolean()),
+    prescriptionRequired: v.optional(v.boolean()),
+    batchNumberVisible: v.optional(v.boolean()),
+    expiryDateVisible: v.optional(v.boolean()),
+    sellerVerificationBadge: v.optional(v.boolean()),
+    // Shipping verification
     shippingVerified: v.optional(v.boolean()),
-    shipsToProtectedMarket: v.optional(v.boolean()),
+    shipsInternationally: v.optional(v.boolean()),
+    shippingOrigin: v.optional(v.string()),
     shippingEvidence: v.optional(v.string()),
+    // Seller linking
     sellerClusterId: v.optional(v.string()),
+    // Metadata
     discoveredAt: v.number(),
   })
     .index("by_investigation", ["investigationId"])
     .index("by_thread", ["threadId"])
-    .index("by_suspicious", ["investigationId", "isSuspicious"]),
+    .index("by_risk", ["investigationId", "riskLevel"]),
 
   // TinyFish live monitor state
   agentMonitor: defineTable({
@@ -73,7 +99,8 @@ export default defineSchema({
       v.literal("launching"),
       v.literal("searching"),
       v.literal("inspecting"),
-      v.literal("verifying_shipping"),
+      v.literal("verifying_credentials"),
+      v.literal("checking_shipping"),
       v.literal("crawling_storefront"),
       v.literal("completed"),
       v.literal("error")
@@ -97,8 +124,15 @@ export default defineSchema({
       imageReuse: v.boolean(),
       descriptionSimilarity: v.boolean(),
       catalogOverlap: v.boolean(),
+      sharedShippingOrigin: v.boolean(),
     }),
     confidenceScore: v.number(),
+    networkRiskLevel: v.union(
+      v.literal("low"),
+      v.literal("medium"),
+      v.literal("high"),
+      v.literal("critical")
+    ),
     activeCountries: v.array(
       v.object({
         country: v.string(),
@@ -108,8 +142,8 @@ export default defineSchema({
     ),
   }).index("by_investigation", ["investigationId"]),
 
-  // Verified shipping routes
-  shippingRoutes: defineTable({
+  // Supply chain routes
+  supplyRoutes: defineTable({
     investigationId: v.id("investigations"),
     findingId: v.id("findings"),
     fromRegion: v.string(),
@@ -120,13 +154,13 @@ export default defineSchema({
     toLongitude: v.number(),
     verified: v.boolean(),
     verificationMethod: v.string(),
-    priceGap: v.number(),
-    severity: v.union(
+    riskLevel: v.union(
       v.literal("low"),
       v.literal("medium"),
       v.literal("high"),
       v.literal("critical")
     ),
+    concern: v.string(),
   }).index("by_investigation", ["investigationId"]),
 
   // Final case file
@@ -135,18 +169,20 @@ export default defineSchema({
     threadId: v.string(),
     title: v.string(),
     executiveSummary: v.string(),
+    publicHealthRiskAssessment: v.string(),
     totalListingsFound: v.number(),
     suspiciousListings: v.number(),
-    verifiedViolations: v.number(),
-    sellerClustersIdentified: v.number(),
+    highRiskListings: v.number(),
+    sellerNetworksIdentified: v.number(),
     findingSummaries: v.array(
       v.object({
         findingId: v.id("findings"),
         title: v.string(),
         marketplace: v.string(),
         sellerName: v.string(),
-        priceDeviation: v.number(),
-        shippingVerified: v.boolean(),
+        riskScore: v.number(),
+        riskLevel: v.string(),
+        topRiskSignals: v.array(v.string()),
       })
     ),
     sellerDossierSummaries: v.array(
@@ -154,6 +190,7 @@ export default defineSchema({
         clusterId: v.string(),
         sellerNames: v.array(v.string()),
         confidenceScore: v.number(),
+        networkRiskLevel: v.string(),
         summary: v.string(),
       })
     ),
@@ -166,6 +203,7 @@ export default defineSchema({
           v.literal("low")
         ),
         detail: v.string(),
+        targetEntity: v.string(),
       })
     ),
     generatedAt: v.number(),
