@@ -1,7 +1,7 @@
 ### INT-1: End-to-End Workflow Smoke Test
 - **Tier:** 1
 - **Est. time:** 30 min
-- **Depends on:** B-2, B-4, C-4
+- **Depends on:** B-2, B-4, B-8, C-4
 - **Blocks:** INT-3
 - **Owner:** Builder B + Builder C (pair)
 - **Files:** No file changes — manual testing + bug fixing
