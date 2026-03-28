@@ -4,7 +4,11 @@ import type {
   GenericDataModel,
 } from "convex/server";
 import { extractorAgent } from "../agents/extractor";
-import { callTinyFish, processTinyFishStream } from "./tinyfish";
+import {
+  callTinyFishWithOptions,
+  processTinyFishStream,
+  type TinyFishBrowserProfile,
+} from "./tinyfish";
 import {
   ListingExtractionSchema,
   type ListingExtraction,
@@ -42,7 +46,10 @@ const SUPPORTED_PROXY_COUNTRIES = new Map<string, string>([
 const BLOCKED_PATTERNS = [
   /access denied/i,
   /captcha/i,
+  /recaptcha/i,
+  /hcaptcha/i,
   /cloudflare/i,
+  /datadome/i,
   /checking your browser/i,
   /security check/i,
   /blocked/i,
@@ -123,8 +130,8 @@ export function buildSearchGoal(input: MarketplaceSearchInput): string {
     "6. Extract every clearly visible product listing on this current results page.",
     "7. For each listing return these fields: title, price as a number without currency symbols, currency, sellerName, listingUrl, imageUrls, shippingInfo, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
     "8. Use null or omit a field when it is not visible. Do not invent values.",
-    "9. If a challenge, redirect, or 'checking your browser' page appears, wait once for it to finish automatically and then continue.",
-    "10. If access is still blocked, a CAPTCHA appears, or the actual search results never load, return {\"error\":\"blocked\",\"reason\":\"brief explanation\"}.",
+    "9. If a challenge, redirect, or 'checking your browser' page appears, wait for it to complete automatically before proceeding.",
+    "10. If a CAPTCHA is shown, wait briefly once to allow automated solve. If the CAPTCHA or access block persists, stop and return {\"error\":\"blocked\",\"reason\":\"captcha_or_access_denied\"}.",
     `11. For context only, the legitimate reference price is about ${input.baselinePrice} ${input.currency}; do not calculate or return risk scoring here.`,
     "12. Return only valid JSON with no markdown. Prefer a JSON array of listing objects.",
   ].join("\n");
@@ -599,6 +606,11 @@ function buildNormalizationFailure(rawResult: unknown): MarketplaceSearchError {
   );
 }
 
+function shouldRetryWithStealth(message: string): boolean {
+  const normalized = message.trim();
+  return looksBlocked(normalized) || /captcha|anti-bot|access denied/i.test(normalized);
+}
+
 export async function runMarketplaceSearch(
   input: MarketplaceSearchInput & {
     extractorCtx: ExtractorCtx;
@@ -613,67 +625,152 @@ export async function runMarketplaceSearch(
 
   const proxyCountryCode = getProxyCountryCode(input.marketplaceUrl);
   const goal = buildSearchGoal(input);
+  const attempts: Array<{
+    profile: TinyFishBrowserProfile;
+    label: string;
+    useProxy: boolean;
+  }> = [
+    {
+      profile: "lite",
+      label: "Connecting to TinyFish...",
+      useProxy: Boolean(proxyCountryCode),
+    },
+    {
+      profile: "stealth",
+      label: "Retrying with TinyFish stealth profile...",
+      useProxy: true,
+    },
+  ];
 
-  let response: Response;
-  try {
-    response = await callTinyFish({
-      url: input.marketplaceUrl,
-      goal,
-      browser_profile: "stealth",
-      proxy_config: {
-        enabled: true,
-        ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
-      },
-    });
-  } catch (error) {
-    throw new MarketplaceSearchError(
-      `TinyFish request failed before the browser run started: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`
+  const requestTimeoutMs = 45_000;
+  let rawResult: unknown = null;
+  let hasRawResult = false;
+  let lastAttemptError: MarketplaceSearchError | null = null;
+
+  for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+    const attempt = attempts[attemptIndex];
+    const isFinalAttempt = attemptIndex === attempts.length - 1;
+
+    if (input.monitor) {
+      await input.monitor.ctx.runMutation(input.monitor.updateAgentFn, {
+        investigationId: input.monitor.meta.investigationId,
+        agentIndex: input.monitor.meta.agentIndex,
+        status: "searching",
+        statusLabel: attempt.label,
+      });
+    }
+
+    const requestAbortController = new AbortController();
+    const requestTimeout = setTimeout(
+      () => requestAbortController.abort(),
+      requestTimeoutMs
     );
-  }
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new MarketplaceSearchError(
-      `TinyFish request failed with status ${response.status}: ${
+    let response: Response;
+    try {
+      response = await callTinyFishWithOptions(
+        {
+          url: input.marketplaceUrl,
+          goal,
+          browser_profile: attempt.profile,
+          ...(attempt.useProxy
+            ? {
+                proxy_config: {
+                  enabled: true,
+                  ...(proxyCountryCode ? { country_code: proxyCountryCode } : {}),
+                },
+              }
+            : {}),
+        },
+        { signal: requestAbortController.signal }
+      );
+    } catch (error) {
+      clearTimeout(requestTimeout);
+      const baseMessage =
+        error instanceof Error && error.name === "AbortError"
+          ? `TinyFish request timed out after ${Math.round(
+              requestTimeoutMs / 1000
+            )}s before the stream began.`
+          : `TinyFish request failed before the browser run started: ${
+              error instanceof Error ? error.message : "unknown error"
+            }`;
+
+      lastAttemptError = new MarketplaceSearchError(baseMessage);
+      if (!isFinalAttempt && shouldRetryWithStealth(baseMessage)) {
+        continue;
+      }
+      throw lastAttemptError;
+    } finally {
+      clearTimeout(requestTimeout);
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      const message = `TinyFish request failed with status ${response.status}: ${
         errorText.trim() || response.statusText || "no response body"
-      }`
-    );
-  }
+      }`;
+      lastAttemptError = new MarketplaceSearchError(message);
+      if (!isFinalAttempt && shouldRetryWithStealth(message)) {
+        continue;
+      }
+      throw lastAttemptError;
+    }
 
-  let rawResult: unknown;
-  try {
-    rawResult = await processTinyFishStream(
-      response,
-      input.monitor?.ctx,
-      input.monitor?.meta,
-      input.monitor?.updateAgentFn
-    );
-  } catch (error) {
-    throw new MarketplaceSearchError(
-      `TinyFish streaming run failed: ${
+    try {
+      rawResult = await processTinyFishStream(
+        response,
+        input.monitor?.ctx,
+        input.monitor?.meta,
+        input.monitor?.updateAgentFn,
+        {
+          readTimeoutMs: 60_000,
+          maxDurationMs: 420_000,
+        }
+      );
+      hasRawResult = true;
+    } catch (error) {
+      const message = `TinyFish streaming run failed: ${
         error instanceof Error ? error.message : "unknown error"
-      }`
-    );
+      }`;
+      lastAttemptError = new MarketplaceSearchError(message);
+      if (!isFinalAttempt && shouldRetryWithStealth(message)) {
+        continue;
+      }
+      throw lastAttemptError;
+    }
+
+    const failure =
+      describeFailure(rawResult) ||
+      (typeof rawResult === "string"
+        ? (() => {
+            for (const candidate of extractJsonCandidates(rawResult)) {
+              try {
+                return describeFailure(JSON.parse(candidate) as unknown);
+              } catch {
+                continue;
+              }
+            }
+            return undefined;
+          })()
+        : undefined);
+
+    if (failure) {
+      lastAttemptError = new MarketplaceSearchError(failure);
+      if (!isFinalAttempt && shouldRetryWithStealth(failure)) {
+        hasRawResult = false;
+        continue;
+      }
+      throw lastAttemptError;
+    }
+
+    break;
   }
 
-  const failure =
-    describeFailure(rawResult) ||
-    (typeof rawResult === "string"
-      ? (() => {
-          for (const candidate of extractJsonCandidates(rawResult)) {
-            try {
-              return describeFailure(JSON.parse(candidate) as unknown);
-            } catch {
-              continue;
-            }
-          }
-          return undefined;
-        })()
-      : undefined);
-  if (failure) {
-    throw new MarketplaceSearchError(failure);
+  if (!hasRawResult) {
+    throw (
+      lastAttemptError ??
+      new MarketplaceSearchError("TinyFish did not return any usable response.")
+    );
   }
 
   const structured = parseStructuredCandidates(rawResult, input);

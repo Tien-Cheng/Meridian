@@ -10,13 +10,23 @@ import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import { openai } from "@ai-sdk/openai";
+import { generateObject } from "ai";
 import { getCoordinates } from "../lib/geocoding";
 import { runMarketplaceSearch } from "../lib/marketplaceSearch";
 import { riskAssessorAgent } from "../agents/riskAssessor";
 import { runSellerClustering } from "../tools/clusterSellers";
 import { runCaseGeneration } from "../tools/generateCaseFile";
-import type { ListingExtraction, RiskSignalAssessment } from "../../shared/schemas";
-import { RiskSignalAssessmentSchema } from "../../shared/schemas";
+import type {
+  InvestigationRequest,
+  ListingExtraction,
+  RiskSignalAssessment,
+} from "../../shared/schemas";
+import {
+  InvestigationRequestSchema,
+  RiskSignalAssessmentSchema,
+} from "../../shared/schemas";
+import { workflow } from "../workflows/investigate";
 
 type GeneratedCase = Awaited<ReturnType<typeof runCaseGeneration>>;
 type FindingRiskLevel = Doc<"findings">["riskLevel"];
@@ -28,12 +38,178 @@ type RiskAssessment = {
   riskSignals: FindingRiskSignal[];
 };
 
+type KickoffResult =
+  | { started: false; reason: string }
+  | { started: true; workflowId: string; regionCount: number };
+
+type InvestigationRegionInput = {
+  name: string;
+  marketplace: string;
+  marketplaceUrl: string;
+  legitimatePrice: number;
+  baselinePrice: number;
+  currency: string;
+  requiresPrescription: boolean;
+};
+
 function normalizeSellerName(name: string): string {
   return name.trim().toLowerCase();
 }
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function normalizeRegion(
+  region: InvestigationRequest["regions"][number]
+): InvestigationRegionInput {
+  const name = region.name.trim();
+  const marketplace = region.marketplace.trim();
+  const currency = region.currency.trim().toUpperCase();
+
+  if (!name) {
+    throw new Error("Region name is required.");
+  }
+
+  if (!marketplace) {
+    throw new Error(`Marketplace is required for region "${name}".`);
+  }
+
+  if (!currency) {
+    throw new Error(`Currency is required for region "${name}".`);
+  }
+
+  let marketplaceUrl: string;
+  try {
+    marketplaceUrl = new URL(region.marketplaceUrl).toString();
+  } catch {
+    throw new Error(
+      `Marketplace URL for region "${name}" must be a valid absolute URL.`
+    );
+  }
+
+  if (!Number.isFinite(region.legitimatePrice) || region.legitimatePrice <= 0) {
+    throw new Error(`Legitimate price for region "${name}" must be > 0.`);
+  }
+
+  return {
+    name,
+    marketplace,
+    marketplaceUrl,
+    legitimatePrice: region.legitimatePrice,
+    baselinePrice: region.legitimatePrice,
+    currency,
+    requiresPrescription: region.requiresPrescription,
+  };
+}
+
+function normalizeParsedPlan(parsed: InvestigationRequest): {
+  drugName: string;
+  drugCategory: string;
+  regulatoryContext: string;
+  regions: InvestigationRegionInput[];
+} {
+  const drugName = parsed.drugName.trim();
+  const drugCategory = parsed.drugCategory.trim();
+  const regulatoryContext = parsed.regulatoryContext.trim();
+
+  if (!drugName) {
+    throw new Error("Drug name is required.");
+  }
+
+  if (!drugCategory) {
+    throw new Error("Drug category is required.");
+  }
+
+  if (!regulatoryContext) {
+    throw new Error("Regulatory context is required.");
+  }
+
+  const regions = parsed.regions.map(normalizeRegion);
+  if (regions.length === 0) {
+    throw new Error("At least one target region is required.");
+  }
+
+  return {
+    drugName,
+    drugCategory,
+    regulatoryContext,
+    regions,
+  };
+}
+
+function planFromInvestigation(
+  investigation: Doc<"investigations">
+):
+  | {
+      drugName: string;
+      drugCategory: string;
+      regulatoryContext: string;
+      regions: InvestigationRegionInput[];
+    }
+  | null {
+  const parsed: InvestigationRequest = {
+    drugName: investigation.drugName?.trim() ?? "",
+    drugCategory: investigation.drugCategory?.trim() ?? "",
+    regulatoryContext: investigation.regulatoryContext?.trim() ?? "",
+    regions: investigation.regions
+      .map((region) => {
+        const legitimatePrice = region.legitimatePrice ?? region.baselinePrice;
+        if (!legitimatePrice) {
+          return null;
+        }
+        return {
+          name: region.name,
+          marketplace: region.marketplace,
+          marketplaceUrl: region.marketplaceUrl,
+          legitimatePrice,
+          currency: region.currency,
+          requiresPrescription: region.requiresPrescription ?? true,
+        };
+      })
+      .filter(
+        (
+          region
+        ): region is InvestigationRequest["regions"][number] => region !== null
+      ),
+  };
+
+  try {
+    InvestigationRequestSchema.parse(parsed);
+    return normalizeParsedPlan(parsed);
+  } catch {
+    return null;
+  }
+}
+
+async function parsePromptIntoPlan(prompt: string): Promise<{
+  drugName: string;
+  drugCategory: string;
+  regulatoryContext: string;
+  regions: InvestigationRegionInput[];
+}> {
+  const parserPrompt = [
+    "Extract a structured pharmaceutical marketplace investigation plan from the user request.",
+    "Focus on realistic fields needed to run a live investigation workflow.",
+    "Rules:",
+    "- Return only concrete values grounded in the user request.",
+    "- Always return at least one region.",
+    "- marketplaceUrl must be a fully qualified https URL.",
+    "- legitimatePrice should be a positive number.",
+    "- requiresPrescription should default to true for prescription medicines.",
+    "",
+    `User request: ${prompt}`,
+  ].join("\n");
+
+  const { object } = await generateObject({
+    model: openai.chat("gpt-5.4"),
+    schema: InvestigationRequestSchema,
+    prompt: parserPrompt,
+    abortSignal: AbortSignal.timeout(30_000),
+  });
+
+  const parsed = InvestigationRequestSchema.parse(object);
+  return normalizeParsedPlan(parsed);
 }
 
 function clamp01(value: number): number {
@@ -524,6 +700,130 @@ export const updateStatus = internalMutation({
   },
   handler: async (ctx, { id, status }) => {
     await ctx.db.patch(id, { status });
+  },
+});
+
+export const applyPlanFromPrompt = internalMutation({
+  args: {
+    id: v.id("investigations"),
+    drugName: v.string(),
+    drugCategory: v.string(),
+    regulatoryContext: v.string(),
+    protectedMarket: v.string(),
+    regions: v.array(
+      v.object({
+        name: v.string(),
+        marketplace: v.string(),
+        marketplaceUrl: v.string(),
+        legitimatePrice: v.number(),
+        baselinePrice: v.number(),
+        currency: v.string(),
+        requiresPrescription: v.boolean(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.id, {
+      drugName: args.drugName,
+      drugCategory: args.drugCategory,
+      brand: args.drugCategory,
+      sku: args.drugName,
+      regulatoryContext: args.regulatoryContext,
+      protectedMarket: args.protectedMarket,
+      regions: args.regions,
+    });
+  },
+});
+
+export const maybeKickoffFromPrompt = internalAction({
+  args: {
+    investigationId: v.id("investigations"),
+    prompt: v.string(),
+  },
+  handler: async (ctx, args): Promise<KickoffResult> => {
+    const investigation: Doc<"investigations"> | null = await ctx.runQuery(
+      internal.functions.investigations.getInvestigationForCase,
+      { id: args.investigationId }
+    );
+
+    if (!investigation) {
+      return { started: false, reason: "investigation_not_found" } as const;
+    }
+
+    if (investigation.status !== "pending") {
+      return {
+        started: false,
+        reason: `already_${investigation.status}`,
+      } as const;
+    }
+
+    const existingPlan = planFromInvestigation(investigation);
+
+    let workflowDrugName: string;
+    let workflowDrugCategory: string;
+    let workflowRegulatoryContext: string;
+    let workflowRegions: InvestigationRegionInput[];
+
+    if (existingPlan) {
+      workflowDrugName = existingPlan.drugName;
+      workflowDrugCategory = existingPlan.drugCategory;
+      workflowRegulatoryContext = existingPlan.regulatoryContext;
+      workflowRegions = existingPlan.regions;
+    } else {
+      const parsedPlan = await parsePromptIntoPlan(args.prompt);
+      workflowDrugName = parsedPlan.drugName;
+      workflowDrugCategory = parsedPlan.drugCategory;
+      workflowRegulatoryContext = parsedPlan.regulatoryContext;
+      workflowRegions = parsedPlan.regions;
+
+      await ctx.runMutation(internal.functions.investigations.applyPlanFromPrompt, {
+        id: investigation._id,
+        drugName: workflowDrugName,
+        drugCategory: workflowDrugCategory,
+        regulatoryContext: workflowRegulatoryContext,
+        protectedMarket: workflowRegulatoryContext,
+        regions: workflowRegions,
+      });
+    }
+
+    await ctx.runMutation(internal.functions.investigations.updateStatus, {
+      id: investigation._id,
+      status: "searching",
+    });
+
+    try {
+      const workflowId: string = await workflow.start(
+        ctx,
+        internal.workflows.investigate.investigationWorkflow,
+        {
+          investigationId: investigation._id,
+          threadId: investigation.threadId,
+          drugName: workflowDrugName,
+          drugCategory: workflowDrugCategory,
+          regions: workflowRegions.map((region: InvestigationRegionInput) => ({
+            name: region.name,
+            marketplace: region.marketplace,
+            marketplaceUrl: region.marketplaceUrl,
+            legitimatePrice: region.legitimatePrice,
+            currency: region.currency,
+            requiresPrescription: region.requiresPrescription,
+          })),
+          regulatoryContext: workflowRegulatoryContext,
+        }
+      );
+
+      return {
+        started: true,
+        workflowId,
+        regionCount: workflowRegions.length,
+      } as const;
+    } catch (error) {
+      await ctx.runMutation(internal.functions.investigations.updateStatus, {
+        id: investigation._id,
+        status: "failed",
+      });
+      throw error;
+    }
   },
 });
 

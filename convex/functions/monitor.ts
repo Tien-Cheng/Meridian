@@ -7,8 +7,9 @@ import {
 import type { Doc, Id } from "../_generated/dataModel";
 import { v } from "convex/values";
 
-type MonitorView = Omit<Doc<"agentMonitor">, "screenshotUrl"> & {
+type MonitorView = Omit<Doc<"agentMonitor">, "screenshotUrl" | "streamingUrl"> & {
   screenshotUrl: string | null;
+  streamingUrl: string | null;
 };
 
 async function findMonitor(
@@ -24,22 +25,22 @@ async function findMonitor(
   return monitors.find((monitor) => monitor.agentIndex === agentIndex) ?? null;
 }
 
-async function resolveScreenshotUrl(
+async function resolveUrl(
   ctx: QueryCtx,
-  screenshotUrl?: string
+  rawUrl?: string
 ): Promise<string | null> {
-  if (!screenshotUrl) {
+  if (!rawUrl) {
     return null;
   }
 
-  if (/^https?:\/\//i.test(screenshotUrl)) {
-    return screenshotUrl;
+  if (/^https?:\/\//i.test(rawUrl)) {
+    return rawUrl;
   }
 
   try {
-    return (await ctx.storage.getUrl(screenshotUrl)) ?? screenshotUrl;
+    return (await ctx.storage.getUrl(rawUrl)) ?? rawUrl;
   } catch {
-    return screenshotUrl;
+    return rawUrl;
   }
 }
 
@@ -58,7 +59,8 @@ export const listByInvestigation = query({
         .sort((left, right) => left.agentIndex - right.agentIndex)
         .map(async (m) => ({
           ...m,
-          screenshotUrl: await resolveScreenshotUrl(ctx, m.screenshotUrl),
+          screenshotUrl: await resolveUrl(ctx, m.screenshotUrl),
+          streamingUrl: await resolveUrl(ctx, m.streamingUrl),
         }))
     );
   },
@@ -81,6 +83,7 @@ export const initAgent = internalMutation({
         status: "launching",
         statusLabel: "Initializing...",
         screenshotUrl: undefined,
+        streamingUrl: undefined,
         currentUrl: undefined,
         updatedAt: Date.now(),
       });
@@ -113,6 +116,7 @@ export const updateAgent = internalMutation({
     ),
     statusLabel: v.string(),
     screenshotUrl: v.optional(v.string()),
+    streamingUrl: v.optional(v.string()),
     currentUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -123,6 +127,7 @@ export const updateAgent = internalMutation({
         status: args.status,
         statusLabel: args.statusLabel,
         screenshotUrl: args.screenshotUrl,
+        streamingUrl: args.streamingUrl,
         currentUrl: args.currentUrl,
         updatedAt: Date.now(),
       });

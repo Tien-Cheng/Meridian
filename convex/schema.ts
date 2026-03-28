@@ -112,6 +112,7 @@ export default defineSchema({
     ),
     statusLabel: v.string(),
     screenshotUrl: v.optional(v.string()),
+    streamingUrl: v.optional(v.string()),
     currentUrl: v.optional(v.string()),
     updatedAt: v.number(),
   }).index("by_investigation", ["investigationId"]),

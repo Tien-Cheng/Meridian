@@ -20,12 +20,25 @@ export const createNewThread = mutation({
 });
 
 export const sendMessage = mutation({
-  args: { threadId: v.string(), prompt: v.string() },
-  handler: async (ctx, { threadId, prompt }) => {
+  args: {
+    threadId: v.string(),
+    prompt: v.string(),
+    investigationId: v.optional(v.id("investigations")),
+  },
+  handler: async (ctx, { threadId, prompt, investigationId }) => {
     const { messageId } = await saveMessage(ctx, components.agent, {
       threadId,
       prompt,
     });
+
+    if (investigationId) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.functions.investigations.maybeKickoffFromPrompt,
+        { investigationId, prompt }
+      );
+    }
+
     await ctx.scheduler.runAfter(0, internal.functions.chat.generateResponse, {
       threadId,
       promptMessageId: messageId,

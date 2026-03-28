@@ -18,7 +18,7 @@ export default function ChatPanel({
   const [input, setInput] = useState("");
   const sendMessage = useMutation(api.functions.chat.sendMessage);
 
-  const { results, status, loadMore } = useUIMessages(
+  const { results } = useUIMessages(
     api.functions.chat.listMessages,
     { threadId },
     { initialNumItems: 50, stream: true }
@@ -28,7 +28,7 @@ export default function ChatPanel({
     const text = input.trim();
     if (!text) return;
     setInput("");
-    await sendMessage({ threadId, prompt: text });
+    await sendMessage({ threadId, prompt: text, investigationId });
   };
 
   return (
