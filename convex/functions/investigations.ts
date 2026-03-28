@@ -19,6 +19,7 @@ import {
 } from "../lib/demoData";
 import { runSellerClustering } from "../tools/clusterSellers";
 import { runCaseGeneration } from "../tools/generateCaseFile";
+import { runInspectListing } from "../tools/inspectListing";
 
 type GeneratedCase = Awaited<ReturnType<typeof runCaseGeneration>>;
 
@@ -416,8 +417,157 @@ export const deepInvestigate = internalAction({
     threadId: v.string(),
     regulatoryContext: v.string(),
   },
-  handler: async () => {
-    // TODO: implement deep investigation of suspicious listings
+  handler: async (ctx, args) => {
+    // Update monitor status to "inspecting"
+    await ctx.runMutation(internal.functions.monitor.updateAgent, {
+      investigationId: args.investigationId,
+      agentIndex: 0,
+      status: "inspecting",
+      statusLabel: "Deep investigation: analyzing high-risk findings",
+    });
+
+    // Query high/critical findings using by_risk index
+    const highRiskFindings = await ctx.runQuery(
+      internal.functions.findings.listHighRiskFindings,
+      { investigationId: args.investigationId }
+    );
+
+    // Sort by riskScore descending, take top 3 for inspection
+    const sorted = [...highRiskFindings].sort(
+      (a, b) => b.riskScore - a.riskScore
+    );
+    const top3 = sorted.slice(0, 3);
+
+    let inspectedCount = 0;
+    let routesCreated = 0;
+
+    // Inspect top 3 findings and enrich with seller details
+    for (const finding of top3) {
+      await ctx.runMutation(internal.functions.monitor.updateAgent, {
+        investigationId: args.investigationId,
+        agentIndex: 0,
+        status: "inspecting",
+        statusLabel: `Inspecting listing: ${finding.sellerName} on ${finding.marketplace}`,
+        currentUrl: finding.listingUrl,
+      });
+
+      // Call inspectListing logic (catch errors per requirement)
+      try {
+        const result = await runInspectListing({
+          listingUrl: finding.listingUrl,
+          marketplace: finding.marketplace,
+          region: finding.region,
+        });
+
+        if (typeof result !== "string") {
+          // Enrich finding with inspection data
+          await ctx.runMutation(internal.functions.findings.enrichFinding, {
+            findingId: finding._id,
+            sellerStorefrontUrl:
+              result.sellerStorefrontUrl ?? undefined,
+            imageUrls:
+              result.imageUrls.length > 0 ? result.imageUrls : undefined,
+            productDescription:
+              result.productDescription ?? undefined,
+            hasPharmacyCredentials:
+              result.pharmacyBadgeVisible ?? undefined,
+            prescriptionRequired:
+              result.prescriptionRequired ?? undefined,
+            batchNumber: result.batchNumber ?? undefined,
+            batchNumberVisible:
+              result.batchNumber != null ? true : undefined,
+            expiryDate: result.expiryDate ?? undefined,
+            expiryDateVisible:
+              result.expiryDate != null ? true : undefined,
+            sellerRating: result.sellerRating ?? undefined,
+            sellerAccountAge: result.sellerAccountAge ?? undefined,
+            shippingEvidence: result.shippingInfo ?? undefined,
+            enrichedAt: Date.now(),
+          });
+          inspectedCount++;
+        } else {
+          console.warn(
+            `inspectListing returned error for ${finding._id}: ${result}`
+          );
+        }
+      } catch (error) {
+        console.error(
+          `inspectListing failed for finding ${finding._id}:`,
+          error instanceof Error ? error.message : error
+        );
+        // Continue with next listing
+      }
+
+      // Create supply route for this finding
+      const fromRegion = finding.shippingOrigin ?? finding.region;
+      const fromCoords = getCoordinates(fromRegion);
+      const toCoords = getCoordinates(finding.region);
+      const concern =
+        finding.riskSignals
+          .slice(0, 3)
+          .map((s) => s.label || s.signal)
+          .join("; ") || `${finding.riskLevel} risk listing`;
+
+      await ctx.runMutation(internal.functions.routes.createRoute, {
+        investigationId: args.investigationId,
+        findingId: finding._id,
+        fromRegion,
+        fromLatitude: fromCoords.latitude,
+        fromLongitude: fromCoords.longitude,
+        toRegion: finding.region,
+        toLatitude: toCoords.latitude,
+        toLongitude: toCoords.longitude,
+        verified: false,
+        verificationMethod: "risk_signal_heuristic",
+        riskLevel: finding.riskLevel as
+          | "low"
+          | "medium"
+          | "high"
+          | "critical",
+        concern,
+      });
+      routesCreated++;
+    }
+
+    // Create supply routes for remaining high/critical findings (no inspection)
+    for (const finding of sorted.slice(3)) {
+      const fromRegion = finding.shippingOrigin ?? finding.region;
+      const fromCoords = getCoordinates(fromRegion);
+      const toCoords = getCoordinates(finding.region);
+      const concern =
+        finding.riskSignals
+          .slice(0, 3)
+          .map((s) => s.label || s.signal)
+          .join("; ") || `${finding.riskLevel} risk listing`;
+
+      await ctx.runMutation(internal.functions.routes.createRoute, {
+        investigationId: args.investigationId,
+        findingId: finding._id,
+        fromRegion,
+        fromLatitude: fromCoords.latitude,
+        fromLongitude: fromCoords.longitude,
+        toRegion: finding.region,
+        toLatitude: toCoords.latitude,
+        toLongitude: toCoords.longitude,
+        verified: false,
+        verificationMethod: "risk_signal_heuristic",
+        riskLevel: finding.riskLevel as
+          | "low"
+          | "medium"
+          | "high"
+          | "critical",
+        concern,
+      });
+      routesCreated++;
+    }
+
+    // Update monitor to completed
+    await ctx.runMutation(internal.functions.monitor.updateAgent, {
+      investigationId: args.investigationId,
+      agentIndex: 0,
+      status: "completed",
+      statusLabel: `Deep investigation complete: ${inspectedCount} listings inspected, ${routesCreated} routes created`,
+    });
   },
 });
 
