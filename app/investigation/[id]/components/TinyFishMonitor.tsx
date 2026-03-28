@@ -11,10 +11,19 @@ interface TinyFishMonitorProps {
 export default function TinyFishMonitor({
   investigationId,
 }: TinyFishMonitorProps) {
-  const agents =
-    useQuery(api.functions.monitor.listByInvestigation, {
-      investigationId,
-    }) ?? [];
+  const agents = useQuery(api.functions.monitor.listByInvestigation, {
+    investigationId,
+  });
+
+  if (agents === undefined) {
+    return (
+      <div className="flex items-center justify-center w-full">
+        <p className="text-zinc-600 font-mono text-xs">
+          Connecting to TinyFish monitor...
+        </p>
+      </div>
+    );
+  }
 
   if (agents.length === 0) {
     return (
@@ -57,6 +66,8 @@ export default function TinyFishMonitor({
           {/* Screenshot / content area */}
           <div className="flex-1 bg-zinc-950 flex items-center justify-center">
             {agent.screenshotUrl ? (
+              // TinyFish screenshot URLs are external and ephemeral, so we render them directly.
+              // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={agent.screenshotUrl}
                 alt={`Agent ${agent.agentIndex} screenshot`}

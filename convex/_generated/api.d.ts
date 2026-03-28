@@ -10,6 +10,7 @@
 
 import type * as agents_extractor from "../agents/extractor.js";
 import type * as agents_investigator from "../agents/investigator.js";
+import type * as agents_riskAssessor from "../agents/riskAssessor.js";
 import type * as auth from "../auth.js";
 import type * as functions_cases from "../functions/cases.js";
 import type * as functions_chat from "../functions/chat.js";
@@ -20,6 +21,7 @@ import type * as functions_routes from "../functions/routes.js";
 import type * as http from "../http.js";
 import type * as lib_constants from "../lib/constants.js";
 import type * as lib_geocoding from "../lib/geocoding.js";
+import type * as lib_marketplaceSearch from "../lib/marketplaceSearch.js";
 import type * as lib_tinyfish from "../lib/tinyfish.js";
 import type * as tools_clusterSellers from "../tools/clusterSellers.js";
 import type * as tools_crawlStorefront from "../tools/crawlStorefront.js";
@@ -38,6 +40,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   "agents/extractor": typeof agents_extractor;
   "agents/investigator": typeof agents_investigator;
+  "agents/riskAssessor": typeof agents_riskAssessor;
   auth: typeof auth;
   "functions/cases": typeof functions_cases;
   "functions/chat": typeof functions_chat;
@@ -48,6 +51,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   "lib/constants": typeof lib_constants;
   "lib/geocoding": typeof lib_geocoding;
+  "lib/marketplaceSearch": typeof lib_marketplaceSearch;
   "lib/tinyfish": typeof lib_tinyfish;
   "tools/clusterSellers": typeof tools_clusterSellers;
   "tools/crawlStorefront": typeof tools_crawlStorefront;

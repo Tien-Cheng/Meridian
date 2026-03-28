@@ -11,10 +11,24 @@ interface ActivityLogProps {
 export default function ActivityLog({
   investigationId,
 }: ActivityLogProps) {
-  const agents =
-    useQuery(api.functions.monitor.listByInvestigation, {
-      investigationId,
-    }) ?? [];
+  const agents = useQuery(api.functions.monitor.listByInvestigation, {
+    investigationId,
+  });
+
+  if (agents === undefined) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="px-3 py-2 border-b border-zinc-800 shrink-0">
+          <h4 className="text-zinc-500 font-mono text-xs tracking-wider">
+            ACTIVITY
+          </h4>
+        </div>
+        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-1">
+          <p className="text-zinc-700 font-mono text-xs">Connecting...</p>
+        </div>
+      </div>
+    );
+  }
 
   // Derive log entries from agent monitor updates
   const entries = agents

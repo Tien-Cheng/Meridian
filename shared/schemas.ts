@@ -43,6 +43,19 @@ export const ListingExtractionSchema = z.object({
   productDescriptionSnippet: z.string().optional(),
 });
 
+export const RiskSignalAssessmentSchema = z.object({
+  riskScore: z.number().min(0).max(1),
+  riskLevel: z.enum(["low", "medium", "high", "critical"]),
+  signals: z.array(
+    z.object({
+      signal: z.string(),
+      label: z.string(),
+      weight: z.number().min(0).max(1),
+      evidence: z.string(),
+    })
+  ),
+});
+
 // GPT case generation structured output
 export const CaseGenerationSchema = z.object({
   executiveSummary: z.string(),
@@ -98,5 +111,6 @@ export const SellerClusteringSchema = z.object({
 
 export type InvestigationRequest = z.infer<typeof InvestigationRequestSchema>;
 export type ListingExtraction = z.infer<typeof ListingExtractionSchema>;
+export type RiskSignalAssessment = z.infer<typeof RiskSignalAssessmentSchema>;
 export type CaseGeneration = z.infer<typeof CaseGenerationSchema>;
 export type SellerClustering = z.infer<typeof SellerClusteringSchema>;
