@@ -1,7 +1,8 @@
 "use client";
 
-import { useParams } from "next/navigation";
-import { useQuery } from "convex/react";
+import { useEffect } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useConvexAuth, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import Link from "next/link";
@@ -18,18 +19,56 @@ const InvestigationMap = dynamic(
 
 export default function InvestigationPage() {
   const { id } = useParams();
+  const router = useRouter();
+  const { isAuthenticated, isLoading: authLoading } = useConvexAuth();
   const investigationId = id as Id<"investigations">;
 
   const investigation = useQuery(api.functions.investigations.get, {
     id: investigationId,
   });
 
-  if (!investigation) {
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.replace("/signin");
+    }
+  }, [authLoading, isAuthenticated, router]);
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-zinc-950">
+        <p className="text-zinc-500 font-mono text-sm animate-pulse">
+          INITIALIZING...
+        </p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return null;
+  }
+
+  if (investigation === undefined) {
     return (
       <div className="flex items-center justify-center h-screen bg-zinc-950">
         <p className="text-zinc-500 font-mono text-sm animate-pulse">
           LOADING INVESTIGATION...
         </p>
+      </div>
+    );
+  }
+
+  if (investigation === null) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 h-screen bg-zinc-950 px-6 text-center">
+        <p className="text-zinc-300 font-mono text-sm">
+          Investigation not found.
+        </p>
+        <Link
+          href="/"
+          className="text-amber-400 hover:text-amber-300 font-mono text-xs"
+        >
+          Back to Console
+        </Link>
       </div>
     );
   }
@@ -77,7 +116,13 @@ export default function InvestigationPage() {
       {/* Bottom bar: TinyFish monitor + activity log */}
       <div className="h-[180px] border-t border-zinc-800 flex shrink-0">
         <div className="flex-1 flex gap-2 p-3 overflow-x-auto">
-          <TinyFishMonitor investigationId={investigationId} />
+          <TinyFishMonitor
+            investigationId={investigationId}
+            regions={investigation.regions.map((region) => ({
+              name: region.name,
+              marketplace: region.marketplace,
+            }))}
+          />
         </div>
         <div className="w-[300px] border-l border-zinc-800">
           <ActivityLog investigationId={investigationId} />

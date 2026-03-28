@@ -131,7 +131,7 @@ export function buildSearchGoal(input: MarketplaceSearchInput): string {
     "7. For each listing return these fields: title, price as a number without currency symbols, currency, sellerName, listingUrl, imageUrls, shippingInfo, pharmacyBadgeVisible, prescriptionRequired, batchNumber, expiryDate, sellerRating, sellerAccountAge, productDescriptionSnippet.",
     "8. Use null or omit a field when it is not visible. Do not invent values.",
     "9. If a challenge, redirect, or 'checking your browser' page appears, wait for it to complete automatically before proceeding.",
-    "10. If a CAPTCHA is shown, wait briefly once to allow automated solve. If the CAPTCHA or access block persists, stop and return {\"error\":\"blocked\",\"reason\":\"captcha_or_access_denied\"}.",
+    "10. If a CAPTCHA is shown, do not attempt to solve it. Stop and return {\"error\":\"blocked\",\"reason\":\"captcha_or_access_denied\"}.",
     `11. For context only, the legitimate reference price is about ${input.baselinePrice} ${input.currency}; do not calculate or return risk scoring here.`,
     "12. Return only valid JSON with no markdown. Prefer a JSON array of listing objects.",
   ].join("\n");
@@ -724,7 +724,7 @@ export async function runMarketplaceSearch(
         input.monitor?.updateAgentFn,
         {
           readTimeoutMs: 60_000,
-          maxDurationMs: 420_000,
+          maxDurationMs: 600_000,
         }
       );
       hasRawResult = true;

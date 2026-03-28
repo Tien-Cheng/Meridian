@@ -791,6 +791,15 @@ export const maybeKickoffFromPrompt = internalAction({
       status: "searching",
     });
 
+    await ctx.runMutation(internal.functions.monitor.primeAgents, {
+      investigationId: investigation._id,
+      agents: workflowRegions.map((region, agentIndex) => ({
+        agentIndex,
+        region: region.name,
+        marketplace: region.marketplace,
+      })),
+    });
+
     try {
       const workflowId: string = await workflow.start(
         ctx,

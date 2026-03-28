@@ -80,6 +80,7 @@ export const initAgent = internalMutation({
       await ctx.db.patch(existing._id, {
         region: args.region,
         marketplace: args.marketplace,
+        tinyfishRunId: undefined,
         status: "launching",
         statusLabel: "Initializing...",
         screenshotUrl: undefined,
@@ -115,6 +116,7 @@ export const updateAgent = internalMutation({
       v.literal("error")
     ),
     statusLabel: v.string(),
+    tinyfishRunId: v.optional(v.string()),
     screenshotUrl: v.optional(v.string()),
     streamingUrl: v.optional(v.string()),
     currentUrl: v.optional(v.string()),
@@ -123,14 +125,80 @@ export const updateAgent = internalMutation({
     const existing = await findMonitor(ctx, args.investigationId, args.agentIndex);
 
     if (existing) {
-      await ctx.db.patch(existing._id, {
+      const patch: Partial<Doc<"agentMonitor">> = {
         status: args.status,
         statusLabel: args.statusLabel,
-        screenshotUrl: args.screenshotUrl,
-        streamingUrl: args.streamingUrl,
-        currentUrl: args.currentUrl,
         updatedAt: Date.now(),
-      });
+      };
+
+      // Preserve existing preview URLs unless explicitly updated.
+      if (args.screenshotUrl !== undefined) {
+        patch.screenshotUrl = args.screenshotUrl;
+      }
+      if (args.streamingUrl !== undefined) {
+        patch.streamingUrl = args.streamingUrl;
+      }
+      if (args.currentUrl !== undefined) {
+        patch.currentUrl = args.currentUrl;
+      }
+      if (args.tinyfishRunId !== undefined) {
+        patch.tinyfishRunId = args.tinyfishRunId;
+      }
+
+      await ctx.db.patch(existing._id, patch);
+    }
+  },
+});
+
+export const primeAgents = internalMutation({
+  args: {
+    investigationId: v.id("investigations"),
+    agents: v.array(
+      v.object({
+        agentIndex: v.number(),
+        region: v.string(),
+        marketplace: v.string(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const existingMonitors = await ctx.db
+      .query("agentMonitor")
+      .withIndex("by_investigation", (q) =>
+        q.eq("investigationId", args.investigationId)
+      )
+      .collect();
+
+    for (const agent of args.agents) {
+      const existing = existingMonitors.find(
+        (monitor) => monitor.agentIndex === agent.agentIndex
+      );
+
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          region: agent.region,
+          marketplace: agent.marketplace,
+          status:
+            existing.status === "completed" || existing.status === "error"
+              ? existing.status
+              : "launching",
+          statusLabel:
+            existing.status === "completed" || existing.status === "error"
+              ? existing.statusLabel
+              : "Queued. Waiting for TinyFish run...",
+          updatedAt: Date.now(),
+        });
+      } else {
+        await ctx.db.insert("agentMonitor", {
+          investigationId: args.investigationId,
+          agentIndex: agent.agentIndex,
+          region: agent.region,
+          marketplace: agent.marketplace,
+          status: "launching",
+          statusLabel: "Queued. Waiting for TinyFish run...",
+          updatedAt: Date.now(),
+        });
+      }
     }
   },
 });

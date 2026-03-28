@@ -23,8 +23,31 @@ type UpdateAgentFn = FunctionReference<"mutation", "public" | "internal">;
 
 const CAPTCHA_SIGNAL_PATTERN =
   /captcha|cloudflare|data\s*dome|checking your browser|access denied|security check/i;
+const BROWSER_SLOT_PATTERN =
+  /waiting for tinyfish browser slot|waiting for browser slot|queue/i;
 const TINYFISH_RUNS_API_BASE = "https://agent.tinyfish.ai/v1/runs";
 const RUN_POLL_INTERVAL_MS = 6_000;
+const EVENT_TYPE_KEYS = new Set(["type", "event", "event_type"]);
+const RUN_ID_KEYS = new Set(["runId", "run_id", "runRef", "run_ref"]);
+const STATUS_KEYS = new Set(["status", "state"]);
+const STATUS_LABEL_KEYS = new Set([
+  "step_description",
+  "stepDescription",
+  "purpose",
+  "message",
+  "detail",
+  "progress",
+]);
+const STREAMING_URL_KEYS = new Set([
+  "streamingUrl",
+  "streaming_url",
+  "streamUrl",
+  "stream_url",
+  "liveUrl",
+  "live_url",
+]);
+const SCREENSHOT_URL_KEYS = new Set(["screenshotUrl", "screenshot_url"]);
+const CURRENT_URL_KEYS = new Set(["currentUrl", "current_url", "url"]);
 
 interface TinyFishRunState {
   status?: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
@@ -56,6 +79,151 @@ function pickString(...values: Array<unknown>): string | undefined {
     }
   }
   return undefined;
+}
+
+function normalizeEventType(value?: string): string | undefined {
+  if (!value || !value.trim()) {
+    return undefined;
+  }
+  return value.trim().toUpperCase().replace(/-/g, "_");
+}
+
+function normalizeHttpUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(value.trim());
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return undefined;
+    }
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start === -1 || end <= start) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(trimmed.slice(start, end + 1));
+      return isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function collectPayloadObjects(input: unknown): Record<string, unknown>[] {
+  const payloads: Record<string, unknown>[] = [];
+  const queue: unknown[] = [input];
+  const seen = new Set<object>();
+
+  while (queue.length > 0) {
+    const candidate = queue.shift();
+    if (!isRecord(candidate)) {
+      continue;
+    }
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    payloads.push(candidate);
+
+    for (const key of ["data", "result", "resultJson", "payload"]) {
+      const nested = candidate[key];
+      if (isRecord(nested)) {
+        queue.push(nested);
+        continue;
+      }
+      if (typeof nested === "string") {
+        const parsed = parseJsonObject(nested);
+        if (parsed) {
+          queue.push(parsed);
+        }
+      }
+    }
+  }
+
+  return payloads;
+}
+
+function extractStreamingUrlFromObject(
+  payload: Record<string, unknown>
+): string | undefined {
+  for (const key of STREAMING_URL_KEYS) {
+    const url = normalizeHttpUrl(payload[key]);
+    if (url) {
+      return url;
+    }
+  }
+  return undefined;
+}
+
+function extractEventStreamingUrl(payload: unknown): string | undefined {
+  if (!isRecord(payload)) {
+    return normalizeHttpUrl(payload);
+  }
+
+  const fromRoot = extractStreamingUrlFromObject(payload);
+  if (fromRoot) {
+    return fromRoot;
+  }
+
+  const nestedData = payload.data;
+  if (isRecord(nestedData)) {
+    return extractStreamingUrlFromObject(nestedData);
+  }
+
+  return normalizeHttpUrl(nestedData);
+}
+
+function extractStreamingUrl(payload: unknown): string | undefined {
+  const fromEvent = extractEventStreamingUrl(payload);
+  if (fromEvent) {
+    return fromEvent;
+  }
+
+  for (const candidate of collectPayloadObjects(payload)) {
+    const fromObject = extractStreamingUrlFromObject(candidate);
+    if (fromObject) {
+      return fromObject;
+    }
+
+    const fromData = normalizeHttpUrl(candidate.data);
+    if (fromData) {
+      return fromData;
+    }
+  }
+
+  return undefined;
+}
+
+function extractRunId(payload: unknown): string | undefined {
+  for (const candidate of collectPayloadObjects(payload)) {
+    for (const key of RUN_ID_KEYS) {
+      const runId = pickString(candidate[key]);
+      if (runId) {
+        return runId;
+      }
+    }
+  }
+
+  return findFirstStringByKey(payload, RUN_ID_KEYS);
 }
 
 function findFirstByKey(
@@ -118,7 +286,10 @@ function findFirstObjectByKey(
 
 function formatProgressLabel(rawLabel: string): string {
   if (CAPTCHA_SIGNAL_PATTERN.test(rawLabel)) {
-    return "Anti-bot challenge detected. Waiting for auto-resolution...";
+    return "CAPTCHA/anti-bot challenge detected. TinyFish cannot auto-solve this challenge.";
+  }
+  if (BROWSER_SLOT_PATTERN.test(rawLabel)) {
+    return "Waiting for TinyFish browser slot...";
   }
   return rawLabel;
 }
@@ -127,36 +298,48 @@ function normalizeEventPayload(
   payload: unknown,
   sseEventTypeHint?: string
 ): NormalizedTinyFishEvent {
-  const type =
-    pickString(
-      sseEventTypeHint,
-      findFirstStringByKey(payload, new Set(["type", "event", "event_type"]))
-    )?.toUpperCase() ?? undefined;
+  const objectPayload =
+    typeof payload === "string" ? parseJsonObject(payload) ?? payload : payload;
 
-  const runId = findFirstStringByKey(payload, new Set(["runId", "run_id"]));
-  const status = findFirstStringByKey(payload, new Set(["status", "state"]));
-  const statusLabel = pickString(
-    findFirstStringByKey(payload, new Set(["step_description", "stepDescription"])),
-    findFirstStringByKey(payload, new Set(["purpose", "message", "detail"]))
+  const type = normalizeEventType(
+    pickString(
+      findFirstStringByKey(objectPayload, EVENT_TYPE_KEYS),
+      sseEventTypeHint
+    )
   );
 
-  const streamingUrl = findFirstStringByKey(payload, new Set(["streamingUrl", "streaming_url"]));
-  const screenshotUrl = findFirstStringByKey(payload, new Set(["screenshotUrl", "screenshot_url"]));
-  const currentUrl = findFirstStringByKey(payload, new Set(["currentUrl", "current_url", "url"]));
+  const runId = extractRunId(objectPayload);
+  const status = findFirstStringByKey(objectPayload, STATUS_KEYS);
+  const statusLabel = pickString(
+    findFirstStringByKey(objectPayload, STATUS_LABEL_KEYS),
+    typeof payload === "string" ? payload : undefined
+  );
 
-  const nestedError = findFirstObjectByKey(payload, new Set(["error"]));
+  const streamingUrl = extractStreamingUrl(objectPayload);
+  const screenshotUrl = findFirstStringByKey(objectPayload, SCREENSHOT_URL_KEYS);
+  const currentUrl = findFirstStringByKey(objectPayload, CURRENT_URL_KEYS);
+
+  const nestedError = findFirstObjectByKey(objectPayload, new Set(["error"]));
   const errorMessage = pickString(
     nestedError?.message,
     nestedError?.error,
-    findFirstStringByKey(payload, new Set(["error", "help_message", "message"]))
+    findFirstStringByKey(
+      objectPayload,
+      new Set(["error", "help_message", "message"])
+    )
   );
 
   const result =
-    findFirstByKey(payload, new Set(["resultJson", "result_json", "result"])) ??
+    findFirstByKey(
+      objectPayload,
+      new Set(["resultJson", "result_json", "result"])
+    ) ??
     undefined;
 
+  const normalizedType = type ?? (streamingUrl ? "STREAMING_URL" : undefined);
+
   return {
-    eventType: type,
+    eventType: normalizedType,
     runId,
     status,
     statusLabel,
@@ -205,7 +388,7 @@ async function fetchRunState(
 
   return {
     status,
-    streamingUrl: pickString(run.streaming_url, run.streamingUrl, payload.streaming_url, payload.streamingUrl),
+    streamingUrl: extractStreamingUrl(run) ?? extractStreamingUrl(payload),
     result: run.result ?? payload.result,
     errorMessage: pickString(
       errorObject?.message,
@@ -258,7 +441,7 @@ export async function processTinyFishStream(
   }
 
   const readTimeoutMs = options?.readTimeoutMs ?? 45_000;
-  const maxDurationMs = options?.maxDurationMs ?? 240_000;
+  const maxDurationMs = options?.maxDurationMs ?? 600_000;
   const decoder = new TextDecoder();
   let buffer = "";
   let result: unknown = null;
@@ -279,7 +462,12 @@ export async function processTinyFishStream(
       | "error"
       | "crawling_storefront",
     statusLabel: string,
-    extras?: { screenshotUrl?: string; streamingUrl?: string; currentUrl?: string }
+    extras?: {
+      screenshotUrl?: string;
+      streamingUrl?: string;
+      currentUrl?: string;
+      tinyfishRunId?: string;
+    }
   ) => {
     if (!ctx || !meta || !updateAgentFn) {
       return;
@@ -293,6 +481,7 @@ export async function processTinyFishStream(
       screenshotUrl: extras?.screenshotUrl,
       streamingUrl: extras?.streamingUrl,
       currentUrl: extras?.currentUrl,
+      tinyfishRunId: extras?.tinyfishRunId ?? activeRunId,
     });
   };
 
@@ -318,11 +507,16 @@ export async function processTinyFishStream(
       return "continue";
     }
 
-    if (runState.streamingUrl && runState.streamingUrl !== activeStreamingUrl) {
+    const shouldReplaceStreamingUrl =
+      runState.streamingUrl &&
+      (!activeStreamingUrl || runState.status === "RUNNING");
+
+    if (shouldReplaceStreamingUrl && runState.streamingUrl !== activeStreamingUrl) {
       activeStreamingUrl = runState.streamingUrl;
       await updateMonitor("searching", "Live browser stream available", {
         streamingUrl: runState.streamingUrl,
         currentUrl: runState.streamingUrl,
+        tinyfishRunId: activeRunId,
       });
     }
 
@@ -331,6 +525,7 @@ export async function processTinyFishStream(
       await updateMonitor("searching", latestStatusLabel, {
         streamingUrl: activeStreamingUrl,
         currentUrl: activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       return "continue";
     }
@@ -342,6 +537,7 @@ export async function processTinyFishStream(
       await updateMonitor("searching", latestStatusLabel, {
         streamingUrl: activeStreamingUrl,
         currentUrl: activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       return "continue";
     }
@@ -353,6 +549,7 @@ export async function processTinyFishStream(
       sawTerminalEvent = true;
       await updateMonitor("completed", "Done", {
         currentUrl: activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       return "completed";
     }
@@ -426,7 +623,7 @@ export async function processTinyFishStream(
     try {
       parsedPayload = JSON.parse(rawData);
     } catch {
-      parsedPayload = { message: rawData };
+      parsedPayload = rawData;
     }
 
     const event = normalizeEventPayload(parsedPayload, sseEventType);
@@ -441,23 +638,35 @@ export async function processTinyFishStream(
       return;
     }
 
-    if (eventType === "STARTED") {
+    if (
+      eventType === "STARTED" ||
+      eventType === "CONNECTED" ||
+      eventType === "AGENT_STARTED"
+    ) {
       latestStatusLabel = "TinyFish run started";
       await updateMonitor("searching", latestStatusLabel, {
         streamingUrl: activeStreamingUrl,
         currentUrl: activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       await syncRunState(true);
       return;
     }
 
-    if (eventType === "STREAMING_URL" || event.streamingUrl) {
-      activeStreamingUrl = event.streamingUrl ?? activeStreamingUrl;
+    const shouldReplaceStreamingUrl =
+      event.streamingUrl &&
+      (!activeStreamingUrl || eventType === "STREAMING_URL");
+    if (shouldReplaceStreamingUrl) {
+      activeStreamingUrl = event.streamingUrl;
+    }
+
+    if (eventType === "STREAMING_URL" || shouldReplaceStreamingUrl) {
       if (activeStreamingUrl) {
         latestStatusLabel = "Live browser stream available";
         await updateMonitor("searching", latestStatusLabel, {
           streamingUrl: activeStreamingUrl,
           currentUrl: activeStreamingUrl,
+          tinyfishRunId: activeRunId,
         });
       }
       if (eventType === "STREAMING_URL") {
@@ -471,6 +680,7 @@ export async function processTinyFishStream(
         screenshotUrl: event.screenshotUrl,
         streamingUrl: activeStreamingUrl,
         currentUrl: event.currentUrl ?? activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       await syncRunState();
       return;
@@ -483,6 +693,7 @@ export async function processTinyFishStream(
       }
       await updateMonitor("completed", "Done", {
         currentUrl: event.currentUrl ?? activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       return;
     }
@@ -503,6 +714,7 @@ export async function processTinyFishStream(
         screenshotUrl: event.screenshotUrl,
         streamingUrl: activeStreamingUrl,
         currentUrl: event.currentUrl ?? activeStreamingUrl,
+        tinyfishRunId: activeRunId,
       });
       await syncRunState();
     }

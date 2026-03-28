@@ -99,6 +99,7 @@ export default defineSchema({
     agentIndex: v.number(),
     region: v.string(),
     marketplace: v.string(),
+    tinyfishRunId: v.optional(v.string()),
     status: v.union(
       v.literal("idle"),
       v.literal("launching"),
