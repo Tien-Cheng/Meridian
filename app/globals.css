@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@source "../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -140,4 +141,41 @@
 /* Amber glow border for header */
 .header-glow {
   border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.meridian-popup .mapboxgl-popup-content {
+  border: 1px solid rgba(63, 63, 70, 1);
+  border-radius: 0;
+  background: rgba(9, 9, 11, 0.96);
+  padding: 0;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.meridian-popup .mapboxgl-popup-tip {
+  border-top-color: rgba(9, 9, 11, 0.96);
+  border-bottom-color: rgba(9, 9, 11, 0.96);
+}
+
+.map-pulse {
+  animation: meridian-map-pulse 2s ease-out 1 forwards;
+}
+
+button[aria-label="Resize map and right panel"],
+button[aria-label="Resize lower monitor bar"] {
+  touch-action: none;
+}
+
+@keyframes meridian-map-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55);
+    transform: scale(0.92);
+  }
+  35% {
+    box-shadow: 0 0 0 10px rgba(245, 158, 11, 0.14);
+    transform: scale(1.06);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
+    transform: scale(1);
+  }
 }

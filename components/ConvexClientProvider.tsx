@@ -1,6 +1,7 @@
 "use client";
 
 import { ConvexAuthNextjsProvider } from "@convex-dev/auth/nextjs";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConvexReactClient } from "convex/react";
 import { ReactNode } from "react";
 
@@ -13,7 +14,7 @@ export default function ConvexClientProvider({
 }) {
   return (
     <ConvexAuthNextjsProvider client={convex}>
-      {children}
+      <TooltipProvider>{children}</TooltipProvider>
     </ConvexAuthNextjsProvider>
   );
 }

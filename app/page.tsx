@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useAuthActions } from "@convex-dev/auth/react";
@@ -66,28 +67,57 @@ function Header() {
 
 function NewInvestigationButton() {
   const createInvestigation = useMutation(api.functions.investigations.create);
+  const seedDemo = useMutation(api.functions.investigations.seedDemo);
   const createNewThread = useMutation(api.functions.chat.createNewThread);
   const router = useRouter();
+  const [loadingAction, setLoadingAction] = useState<"new" | "demo" | null>(
+    null
+  );
 
   const handleNew = async () => {
-    const threadId = await createNewThread();
-    const id = await createInvestigation({
-      threadId,
-      drugName: "",
-      drugCategory: "",
-      regions: [],
-      regulatoryContext: "",
-    });
-    router.push(`/investigation/${id}`);
+    setLoadingAction("new");
+    try {
+      const threadId = await createNewThread();
+      const id = await createInvestigation({
+        threadId,
+        drugName: "",
+        drugCategory: "",
+        regions: [],
+        regulatoryContext: "",
+      });
+      router.push(`/investigation/${id}`);
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+
+  const handleDemo = async () => {
+    setLoadingAction("demo");
+    try {
+      const { investigationId } = await seedDemo({});
+      router.push(`/investigation/${investigationId}`);
+    } finally {
+      setLoadingAction(null);
+    }
   };
 
   return (
-    <button
-      className="bg-amber-500 hover:bg-amber-400 text-zinc-950 font-mono font-bold px-8 py-3 transition-colors cursor-pointer text-sm tracking-wider"
-      onClick={() => void handleNew()}
-    >
-      + NEW INVESTIGATION
-    </button>
+    <div className="flex flex-wrap items-center justify-center gap-3">
+      <button
+        className="bg-amber-500 hover:bg-amber-400 text-zinc-950 font-mono font-bold px-8 py-3 transition-colors cursor-pointer text-sm tracking-wider disabled:opacity-60 disabled:cursor-not-allowed"
+        disabled={loadingAction !== null}
+        onClick={() => void handleNew()}
+      >
+        {loadingAction === "new" ? "INITIALIZING..." : "+ NEW INVESTIGATION"}
+      </button>
+      <button
+        className="border border-amber-500 text-amber-500 hover:bg-amber-500/10 font-mono font-bold px-8 py-3 transition-colors cursor-pointer text-sm tracking-wider disabled:opacity-60 disabled:cursor-not-allowed"
+        disabled={loadingAction !== null}
+        onClick={() => void handleDemo()}
+      >
+        {loadingAction === "demo" ? "LOADING DEMO..." : "LOAD DEMO"}
+      </button>
+    </div>
   );
 }
 
